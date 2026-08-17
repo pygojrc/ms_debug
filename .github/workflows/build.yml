@@ -67,6 +67,9 @@ jobs:
       - name: Build targets
         working-directory: frida
         shell: bash
+        # frida 的 compat bundle 自定义目标会再次调用 meson，需要 ANDROID_NDK_ROOT
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: make frida-server frida-gadget frida-code-inject frida-so-inject
 
       - name: Collect artifacts
