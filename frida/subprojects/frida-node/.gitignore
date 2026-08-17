@@ -3,4 +3,4 @@
 /node_modules/
 /npm-debug.log
 /src/frida_bindgen/__pycache__/
-/subprojects/*
+/subprojects/*/

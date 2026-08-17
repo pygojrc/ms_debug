@@ -3,4 +3,4 @@
 /build/
 /deps/
 /dist/
-/subprojects/*
+/subprojects/*/
