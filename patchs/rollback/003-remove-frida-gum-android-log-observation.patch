@@ -1,0 +1,335 @@
+--- a/bindings/gumjs/gumscriptscheduler.c
++++ b/bindings/gumjs/gumscriptscheduler.c
+@@ -6,14 +6,6 @@
+ 
+ #include "gumscriptscheduler.h"
+ 
+-#ifdef HAVE_ANDROID
+-# include <android/log.h>
+-# define MY_OBS_LOG(...) \
+-    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
+-#else
+-# define MY_OBS_LOG(...)
+-#endif
+-
+ struct _GumScriptScheduler
+ {
+   GObject parent;
+@@ -122,8 +114,6 @@
+   {
+     self->js_loop = g_main_loop_new (self->js_context, TRUE);
+ 
+-    /* 观测 JS 线程名，同时避开默认 gum-js-loop 标识。 */
+-    MY_OBS_LOG ("script scheduler start thread_name=my_loop");
+     self->js_thread = g_thread_new ("my_loop",
+         (GThreadFunc) gum_script_scheduler_run_js_loop, self);
+   }
+@@ -134,7 +124,6 @@
+ {
+   if (self->js_thread != NULL)
+   {
+-    MY_OBS_LOG ("script scheduler stop");
+     gum_script_scheduler_push_job_on_js_thread (self, G_PRIORITY_LOW,
+         (GumScriptJobFunc) g_main_loop_quit, self->js_loop, NULL);
+     g_thread_join (self->js_thread);
+--- a/gum/backend-arm64/guminterceptor-arm64.c
++++ b/gum/backend-arm64/guminterceptor-arm64.c
+@@ -25,16 +25,8 @@
+ # include <stdlib.h>
+ #endif
+ #ifdef HAVE_ANDROID
+-# include <android/log.h>
+ # include <dlfcn.h>
+ # include <string.h>
+-#endif
+-
+-#ifdef HAVE_ANDROID
+-# define MY_OBS_LOG(...) \
+-    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
+-#else
+-# define MY_OBS_LOG(...)
+ #endif
+ 
+ #define GUM_INTERCEPTOR_FULL_REDIRECT_SIZE 16
+@@ -120,8 +112,6 @@
+ 
+   if (dladdr (function_address, &info) == 0)
+   {
+-    MY_OBS_LOG ("arm64 special lookup dladdr-failed function=%p",
+-        function_address);
+     return FALSE;
+   }
+ 
+@@ -134,14 +124,10 @@
+ 
+   if (matched)
+   {
+-    MY_OBS_LOG ("arm64 special matched PrettyMethod function=%p symbol=%s file=%s",
+-        function_address, symbol_name, module_name);
+   }
+   else if (strstr (module_name, "libart.so") != NULL ||
+       strstr (symbol_name, "PrettyMethod") != NULL)
+   {
+-    MY_OBS_LOG ("arm64 special not-matched function=%p symbol=%s file=%s",
+-        function_address, symbol_name, module_name);
+   }
+ 
+   return matched;
+@@ -718,9 +704,6 @@
+ 
+   data->scratch_reg = ctx->scratch_register;
+ 
+-  MY_OBS_LOG ("arm64 prepare begin function=%p type=%d force=%d",
+-      function_address, ctx->type, force);
+-
+   if (ctx->write_redirect != NULL)
+   {
+     guint scan_bytes;
+@@ -746,9 +729,6 @@
+     data->redirect_code_size = GUM_INTERCEPTOR_FULL_REDIRECT_SIZE;
+     ctx->trampoline_slice = gum_code_allocator_alloc_slice (self->allocator);
+     ctx->redirect_code = g_malloc (data->available_space);
+-    MY_OBS_LOG ("arm64 prepare custom function=%p available=%u scratch=%d",
+-        function_address, data->available_space, data->scratch_reg);
+-
+     return TRUE;
+   }
+ 
+@@ -761,8 +741,6 @@
+     data->redirect_code_size = GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE;
+ 
+     ctx->trampoline_slice = gum_code_allocator_alloc_slice (self->allocator);
+-    MY_OBS_LOG ("arm64 prepare art-pretty24 function=%p redirect_limit=%u scratch=%d",
+-        function_address, redirect_limit, data->scratch_reg);
+   }
+   else if (gum_arm64_relocator_can_relocate (function_address,
+         GUM_INTERCEPTOR_FULL_REDIRECT_SIZE, scenario, ctx->relocation_policy,
+@@ -776,8 +754,6 @@
+     data->redirect_code_size = GUM_INTERCEPTOR_FULL_REDIRECT_SIZE;
+ 
+     ctx->trampoline_slice = gum_code_allocator_alloc_slice (self->allocator);
+-    MY_OBS_LOG ("arm64 prepare full function=%p redirect_limit=%u scratch=%d",
+-        function_address, redirect_limit, data->scratch_reg);
+   }
+   else if (force)
+   {
+@@ -792,8 +768,6 @@
+           : ARM64_REG_X16;
+     }
+ 
+-    MY_OBS_LOG ("arm64 prepare force function=%p redirect_limit=%u scratch=%d",
+-        function_address, redirect_limit, data->scratch_reg);
+     return TRUE;
+   }
+   else if (ctx->type == GUM_INTERCEPTOR_TYPE_FAST)
+@@ -809,8 +783,6 @@
+      * replacement function (since the distance may be too far for short-range
+      * instructions). Therefore, we cannot proceed in this case.
+      */
+-    MY_OBS_LOG ("arm64 prepare fast-failed function=%p redirect_limit=%u",
+-        function_address, redirect_limit);
+     return FALSE;
+   }
+   else
+@@ -821,8 +793,6 @@
+     if (redirect_limit >= 8)
+     {
+       data->redirect_code_size = 8;
+-      MY_OBS_LOG ("arm64 prepare near8 function=%p redirect_limit=%u",
+-          function_address, redirect_limit);
+ 
+       spec.near_address = GSIZE_TO_POINTER (
+           GPOINTER_TO_SIZE (function_address) &
+@@ -833,8 +803,6 @@
+     else if (redirect_limit >= 4)
+     {
+       data->redirect_code_size = 4;
+-      MY_OBS_LOG ("arm64 prepare near4 function=%p redirect_limit=%u",
+-          function_address, redirect_limit);
+ 
+       spec.near_address = function_address;
+       spec.max_distance = GUM_ARM64_B_MAX_DISTANCE;
+@@ -842,8 +810,6 @@
+     }
+     else
+     {
+-      MY_OBS_LOG ("arm64 prepare failed function=%p redirect_limit=%u",
+-          function_address, redirect_limit);
+       return FALSE;
+     }
+ 
+@@ -853,8 +819,6 @@
+     {
+       ctx->trampoline_slice = gum_code_allocator_alloc_slice (self->allocator);
+       *need_deflector = TRUE;
+-      MY_OBS_LOG ("arm64 prepare deflector-needed function=%p size=%u",
+-          function_address, data->redirect_code_size);
+     }
+   }
+ 
+@@ -868,14 +832,10 @@
+         : ARM64_REG_X16;
+   }
+ 
+-  MY_OBS_LOG ("arm64 prepare done function=%p size=%u need_deflector=%d",
+-      function_address, data->redirect_code_size, *need_deflector);
+-
+   return TRUE;
+ 
+ no_scratch_reg:
+   {
+-    MY_OBS_LOG ("arm64 prepare no-scratch function=%p", function_address);
+     gum_code_slice_unref (ctx->trampoline_slice);
+     ctx->trampoline_slice = NULL;
+     return FALSE;
+@@ -1211,9 +1171,6 @@
+   }
+   else
+   {
+-    MY_OBS_LOG ("arm64 activate function=%p size=%u on_enter=0x%"
+-        G_GINT64_MODIFIER "x",
+-        ctx->function_address, data->redirect_code_size, (guint64) on_enter);
+     switch (data->redirect_code_size)
+     {
+       case 4:
+@@ -1229,8 +1186,6 @@
+         break;
+       case GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE:
+         /* PrettyMethod 特例：先写两条固定指令，再接原 ldr + br 跳转。 */
+-        MY_OBS_LOG ("arm64 activate art-pretty24 function=%p",
+-            ctx->function_address);
+         gum_arm64_writer_put_instruction (aw, 0xD2400000);
+         gum_arm64_writer_put_instruction (aw, 0xD2400000);
+         gum_arm64_writer_put_ldr_reg_address (aw, data->scratch_reg, on_enter);
+--- a/gum/gum.c
++++ b/gum/gum.c
+@@ -302,11 +302,6 @@
+   g_log_set_default_handler (gum_on_log_message, NULL);
+   gum_do_init ();
+ 
+-  /* 观测初始化默认标识，同时避开默认 frida prgname。 */
+-#ifdef HAVE_ANDROID
+-  __android_log_print (ANDROID_LOG_INFO, "MYOBS",
+-      "my init set_prgname=gogogo");
+-#endif
+   g_set_prgname ("gogogo");
+ 
+ #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
+--- a/gum/gumelfmodule.c
++++ b/gum/gumelfmodule.c
+@@ -20,18 +20,7 @@
+ # include <minizip/mz_zip.h>
+ # include <minizip/mz_zip_rw.h>
+ #endif
+-#ifdef HAVE_ANDROID
+-# include <android/log.h>
+-#endif
+-
+ #include <string.h>
+-
+-#ifdef HAVE_ANDROID
+-# define MY_OBS_LOG(...) \
+-    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
+-#else
+-# define MY_OBS_LOG(...)
+-#endif
+ 
+ #define GUM_ELF_DEFAULT_MAPPED_SIZE (64 * 1024)
+ #define GUM_ELF_PAGE_START(value, page_size) \
+@@ -471,8 +460,6 @@
+     case PROP_SOURCE_PATH:
+       g_free (self->source_path);
+       self->source_path = g_value_dup_string (value);
+-      MY_OBS_LOG ("elf set source_path=%s",
+-          self->source_path != NULL ? self->source_path : "<null>");
+       break;
+     case PROP_SOURCE_BLOB:
+       g_bytes_unref (self->source_blob);
+@@ -491,8 +478,6 @@
+                               GError ** error)
+ {
+   GumElfModule * module;
+-
+-  MY_OBS_LOG ("elf new_from_file path=%s", path != NULL ? path : "<null>");
+ 
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "source-path", path,
+@@ -513,8 +498,6 @@
+ {
+   GumElfModule * module;
+ 
+-  MY_OBS_LOG ("elf new_from_blob blob=%p", blob);
+-
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "source-blob", blob,
+       "source-mode", GUM_ELF_SOURCE_MODE_OFFLINE,
+@@ -534,9 +517,6 @@
+                                 GError ** error)
+ {
+   GumElfModule * module;
+-
+-  MY_OBS_LOG ("elf new_from_memory path=%s base=0x%" G_GINT64_MODIFIER "x",
+-      path != NULL ? path : "<null>", (guint64) base_address);
+ 
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "base-address", base_address,
+@@ -561,15 +541,9 @@
+   if (self->file_bytes != NULL)
+     return TRUE;
+ 
+-  MY_OBS_LOG ("elf load begin path=%s mode=%d base=0x%" G_GINT64_MODIFIER "x",
+-      self->source_path != NULL ? self->source_path : "<blob>",
+-      self->source_mode, (guint64) self->base_address);
+-
+   if (self->source_blob != NULL)
+   {
+     self->file_bytes = g_bytes_ref (self->source_blob);
+-    MY_OBS_LOG ("elf load source_blob path=%s",
+-        self->source_path != NULL ? self->source_path : "<blob>");
+   }
+   else
+   {
+@@ -590,7 +564,6 @@
+       gchar * contents = NULL;
+       gsize length = 0;
+ 
+-      MY_OBS_LOG ("elf load read-file path=%s", self->source_path);
+       if (g_file_get_contents (self->source_path, &contents, &length,
+           &local_error))
+       {
+@@ -601,14 +574,9 @@
+         r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
+         gum_cloak_add_range (&r);
+         self->file_mapped_range = r;
+-        MY_OBS_LOG ("elf load read-file ok path=%s size=%" G_GSIZE_FORMAT,
+-            self->source_path, size);
+       }
+       else
+       {
+-        MY_OBS_LOG ("elf load read-file failed path=%s mode=%d error=%s",
+-            self->source_path, self->source_mode,
+-            local_error != NULL ? local_error->message : "<none>");
+         if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+           goto unable_to_open;
+ 
+@@ -616,20 +584,11 @@
+         self->file_bytes = g_bytes_new_static (
+             GSIZE_TO_POINTER (self->base_address),
+             G_MAXSIZE - self->base_address);
+-        MY_OBS_LOG ("elf load live-memory fallback path=%s", self->source_path);
+       }
+     }
+-    else
+-    {
+-      MY_OBS_LOG ("elf load apk-extract path=%s", self->source_path);
+-    }
+   }
+ 
+   self->file_data = g_bytes_get_data (self->file_bytes, &self->file_size);
+-  MY_OBS_LOG ("elf load bytes path=%s data=%p size=%" G_GSIZE_FORMAT,
+-      self->source_path != NULL ? self->source_path : "<blob>",
+-      self->file_data, self->file_size);
+-
+   if (!gum_elf_module_load_elf_header (self, error))
+     goto propagate_error;
+ 

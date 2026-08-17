@@ -1,0 +1,12 @@
+# frida 构建产物（构建时由 configure 自动生成，不入仓）
+frida/build/
+frida/bin/
+frida/deps/
+frida/install/
+
+# 本地运行/调试产物
+running_docs/
+running_scripts/
+running_files/
+*.o
+*.a

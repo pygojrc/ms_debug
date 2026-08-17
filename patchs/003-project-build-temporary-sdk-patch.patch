@@ -1,0 +1,59 @@
+diff --git a/scripts/apply_frida_17_15_1_patches.sh b/scripts/apply_frida_17_15_1_patches.sh
+new file mode 100755
+index 0000000..9e17c2a
+--- /dev/null
++++ b/scripts/apply_frida_17_15_1_patches.sh
+@@ -0,0 +1,6 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# 兼容入口，实际复现逻辑集中维护在 patchs/ 下。
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++exec bash "${ROOT_DIR}/patchs/apply_frida_17_15_1_patches.sh" "$@"
+diff --git a/scripts/build_frida_android.sh b/scripts/build_frida_android.sh
+index ae0b8b4..df678a3 100755
+--- a/scripts/build_frida_android.sh
++++ b/scripts/build_frida_android.sh
+@@ -36,7 +36,7 @@ NDK_MAJOR="${NDK_REVISION%%.*}"
+ CONFIGURE_OPTIONS=()
+ MESON_OPTIONS=()
+ if [[ "${NDK_MAJOR}" != "29" ]]; then
+-  echo "Frida 17.9.10 需要 Android NDK r29，当前为：${NDK_REVISION}" >&2
++  echo "Frida 17.15.1 需要 Android NDK r29，当前为：${NDK_REVISION}" >&2
+   exit 1
+ fi
+
+@@ -55,9 +55,9 @@ fi
+ cd "${FRIDA_DIR}"
+
+ # 确保源码基于用户要求的 tag；允许项目本地修复提交叠加在该 tag 之后。
+-if ! git merge-base --is-ancestor "17.9.10" HEAD; then
++if ! git merge-base --is-ancestor "17.15.1" HEAD; then
+   CURRENT_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+-  echo "当前 Frida 不是基于 tag 17.9.10，实际：${CURRENT_TAG:-未命中标签}" >&2
++  echo "当前 Frida 不是基于 tag 17.15.1，实际：${CURRENT_TAG:-未命中标签}" >&2
+   exit 1
+ fi
+
+diff --git a/scripts/run_podman.sh b/scripts/run_podman.sh
+index 7244e7f..551ef87 100755
+--- a/scripts/run_podman.sh
++++ b/scripts/run_podman.sh
+@@ -8,7 +8,7 @@ LOG_FILE="${ROOT_DIR}/tmp/running.md"
+ # 容器镜像默认使用已安装 Frida 构建依赖的 Ubuntu 26.04 开发镜像，可通过 IMG 覆盖。
+ IMG="${IMG:-localhost/ubuntu26:dev}"
+
+-# Frida 17.9.10 的 Android 构建代码要求 NDK r29，可通过 NDK_HOST 覆盖。
++# Frida 17.15.1 的 Android 构建代码要求 NDK r29，可通过 NDK_HOST 覆盖。
+ NDK_HOST="${NDK_HOST:-/data/opt/android-ndk-r29}"
+
+ # 默认使用 JDK 17，可通过 JDK_HOST 覆盖。
+@@ -33,7 +33,7 @@ fi
+ # 检查 NDK 主版本，避免误用不兼容版本。
+ NDK_REVISION="$(sed -n 's/^Pkg.Revision = //p' "${NDK_HOST}/source.properties" | head -n 1)"
+ if [[ "${NDK_REVISION%%.*}" != "29" ]]; then
+-  echo "Frida 17.9.10 需要 Android NDK r29，当前为：${NDK_REVISION}" >&2
++  echo "Frida 17.15.1 需要 Android NDK r29，当前为：${NDK_REVISION}" >&2
+   exit 1
+ fi
+

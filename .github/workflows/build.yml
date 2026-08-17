@@ -1,0 +1,108 @@
+name: build-android
+
+# 触发：推送到 main（仅构建验证）；推送 tag（构建并发布到 releases）；手动触发（仅构建）
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # frida 官方交叉编译环境，自带 valac/meson/ninja/go/gcc/pkg-config/git 等。
+    # 若该镜像不可拉取，可回退为 ubuntu-latest + apt 安装上述工具，并把 --build 固定为 linux-x86_64。
+    container: ghcr.io/frida/x-tools-linux-x86_64:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Cache frida deps (SDK/toolchain)
+        uses: actions/cache@v4
+        with:
+          path: frida/deps
+          key: frida-deps-android-${{ matrix.arch }}-17.15.3
+
+      - name: Inject frida version (vendored 树无 .git，frida_version.py 需要 tag)
+        working-directory: frida
+        shell: bash
+        run: |
+          git init -q
+          git -c user.email=ci@ci -c user.name=ci commit --allow-empty -qm "17.15.3"
+          git tag 17.15.3
+          echo "frida_version=$(python3 releng/frida_version.py)"
+
+      - name: Configure (自动从 frida 公共 S3 拉取 prebuilt SDK/toolchain)
+        working-directory: frida
+        shell: bash
+        run: ./configure --host=android-${{ matrix.arch }} --prefix="$PWD/install"
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: 修补 SDK 内 glib 线程名（对应 MyFrida patch 002 / 003）
+        working-directory: frida
+        shell: bash
+        run: |
+          SDK_LIB="deps/sdk-android-${{ matrix.arch }}/lib"
+          if [ -f "$SDK_LIB/libglib-2.0.a" ]; then
+            python3 scripts/修补_ms线程名.py "$SDK_LIB/libglib-2.0.a" "$SDK_LIB/libgio-2.0.a"
+          else
+            echo "未找到 libglib-2.0.a，跳过线程名修补（不影响构建）"
+          fi
+
+      - name: Build targets
+        working-directory: frida
+        shell: bash
+        run: make frida-server frida-gadget frida-code-inject frida-so-inject
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out/android-${{ matrix.arch }}
+          find frida/build -name frida-server -type f -exec cp -f {} out/android-${{ matrix.arch }}/ms_server \;
+          find frida/build -name 'frida-gadget.so' -type f -exec cp -f {} out/android-${{ matrix.arch }}/gadget.so \;
+          find frida/build -name frida-code-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-code-inject \;
+          find frida/build -name frida-so-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-so-inject \;
+          echo "=== 收集产物 ==="; ls -la out/android-${{ matrix.arch }}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ matrix.arch }}
+          path: out/android-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 发布到 releases（版本号使用 frida 官方版本号）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Frida ${{ github.ref_name }} (MyFrida patches)
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

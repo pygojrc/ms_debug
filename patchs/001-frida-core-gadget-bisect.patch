@@ -1,0 +1,243 @@
+diff --git a/lib/gadget/gadget-glue.c b/lib/gadget/gadget-glue.c
+index bc340c4f..82c64d6e 100644
+--- a/lib/gadget/gadget-glue.c
++++ b/lib/gadget/gadget-glue.c
+@@ -20,6 +20,7 @@ static void frida_parse_apple_parameters (const gchar * apple[], gboolean * foun
+ #endif
+
+ static gpointer run_worker_loop (gpointer data);
++static gboolean frida_gadget_bisect_stop_after (const gchar * stage);
+ static gboolean stop_worker_loop (gpointer data);
+
+ static GumThreadId worker_tid;
+@@ -90,8 +91,12 @@ frida_gadget_environment_init (void)
+   frida_libc_shim_init ();
+ #endif
+   gio_init ();
++  if (frida_gadget_bisect_stop_after ("glue-gio-init"))
++    return;
+
+   g_thread_set_garbage_handler (_frida_gadget_on_pending_thread_garbage, NULL);
++  if (frida_gadget_bisect_stop_after ("glue-garbage-handler"))
++    return;
+
+ #if defined (HAVE_GIOAPPLE)
+   g_io_module_apple_register ();
+@@ -100,7 +105,11 @@ frida_gadget_environment_init (void)
+ #endif
+
+   gum_script_backend_get_type (); /* Warm up */
++  if (frida_gadget_bisect_stop_after ("glue-script-backend-type"))
++    return;
+   frida_error_quark (); /* Initialize early so GDBus will pick it up */
++  if (frida_gadget_bisect_stop_after ("glue-error-quark"))
++    return;
+
+ #if defined (HAVE_ANDROID) && __ANDROID_API__ < __ANDROID_API_L__
+   /*
+@@ -111,8 +120,27 @@ frida_gadget_environment_init (void)
+ #endif
+
+   worker_context = g_main_context_ref (g_main_context_default ());
++  if (frida_gadget_bisect_stop_after ("glue-worker-context"))
++    return;
+   worker_loop = g_main_loop_new (worker_context, FALSE);
+-  worker_thread = g_thread_new ("frida-gadget", run_worker_loop, NULL);
++  if (frida_gadget_bisect_stop_after ("glue-worker-loop"))
++    return;
++  worker_thread = g_thread_new ("mygadget-worker", run_worker_loop, NULL);
++  if (frida_gadget_bisect_stop_after ("glue-worker-thread"))
++    return;
++}
++
++static gboolean
++frida_gadget_bisect_stop_after (const gchar * stage)
++{
++  gchar * path;
++  gboolean stop;
++
++  path = g_strconcat ("/data/local/tmp/mygadget.stop.", stage, NULL);
++  stop = g_file_test (path, G_FILE_TEST_EXISTS);
++  g_free (path);
++
++  return stop;
+ }
+
+ void
+@@ -212,9 +240,18 @@ static gpointer
+ run_worker_loop (gpointer data)
+ {
+   worker_tid = gum_process_get_current_thread_id ();
++  if (frida_gadget_bisect_stop_after ("glue-worker-entry"))
++    return NULL;
+
+   g_main_context_push_thread_default (worker_context);
++  if (frida_gadget_bisect_stop_after ("glue-worker-push-context"))
++  {
++    g_main_context_pop_thread_default (worker_context);
++    return NULL;
++  }
+   g_main_loop_run (worker_loop);
++  if (frida_gadget_bisect_stop_after ("glue-worker-loop-return"))
++    return NULL;
+   g_main_context_pop_thread_default (worker_context);
+
+   return NULL;
+diff --git a/lib/gadget/gadget.vala b/lib/gadget/gadget.vala
+index 230284c7..75a3c5fc 100644
+--- a/lib/gadget/gadget.vala
++++ b/lib/gadget/gadget.vala
+@@ -376,35 +376,62 @@ namespace Frida.Gadget {
+ 	private Mutex mutex;
+ 	private Cond cond;
+
++	private bool stop_after (string stage) {
++		string path = "/data/local/tmp/mygadget.stop." + stage;
++		if (FileUtils.test (path, FileTest.EXISTS))
++			return true;
++		return false;
++	}
++
+ 	public void load (Gum.MemoryRange? mapped_range, string? config_data, int * result) {
+ 		if (loaded)
+ 			return;
+ 		loaded = true;
+
++		// 二分实验开关：存在该文件时仅验证 dlopen，不执行 gadget 初始化逻辑。
++		if (FileUtils.test ("/data/local/tmp/mygadget.nop", FileTest.EXISTS)) {
++			log_warning ("bisect: mygadget.nop exists, skip gadget init");
++			return;
++		}
++
+ 		Environment.init ();
++		if (stop_after ("environment-init"))
++			return;
+
+ 		Gee.Promise<int>? request = null;
+ 		if (result != null)
+ 			request = new Gee.Promise<int> ();
+
+ 		location = detect_location (mapped_range);
++		if (stop_after ("detect-location"))
++			return;
+
+ 		try {
+ 			config = (config_data != null)
+ 				? parse_config (config_data)
+ 				: load_config (location);
+ 		} catch (Error e) {
+-			log_warning (e.message);
++				log_warning (e.message);
++				return;
++			}
++		if (stop_after ("load-config"))
+ 			return;
+-		}
+
+ 		Gum.Process.set_teardown_requirement (config.teardown);
+ 		Gum.Process.set_code_signing_policy (config.code_signing);
++		if (stop_after ("process-policy"))
++			return;
+
+ 		Gum.Cloak.add_range (location.range);
++		if (stop_after ("cloak-range"))
++			return;
+
+ 		interceptor = Gum.Interceptor.obtain ();
++		if (stop_after ("interceptor-obtain"))
++			return;
+ 		interceptor.begin_transaction ();
++		if (stop_after ("interceptor-begin"))
++			return;
+
+ #if DARWIN
+ 		if (mapped_range != null)
+@@ -412,6 +439,8 @@ namespace Frida.Gadget {
+ #endif
+
+ 		exceptor = Gum.Exceptor.obtain ();
++		if (stop_after ("exceptor-obtain"))
++			return;
+
+ 		try {
+ 			var interaction = config.interaction;
+@@ -435,8 +464,12 @@ namespace Frida.Gadget {
+ 				log_warning ("Failed to start: " + e.message);
+ 			}
+ 		}
++		if (stop_after ("controller-create"))
++			return;
+
+ 		interceptor.end_transaction ();
++		if (stop_after ("interceptor-end"))
++			return;
+
+ 		if (controller == null)
+ 			return;
+@@ -450,6 +483,8 @@ namespace Frida.Gadget {
+
+ 		if (!wait_for_resume_needed)
+ 			resume ();
++		if (stop_after ("resume"))
++			return;
+
+ 		if (wait_for_resume_needed && Environment.can_block_at_load_time ()) {
+ 			var scheduler = Gum.ScriptBackend.get_scheduler ();
+@@ -475,6 +510,8 @@ namespace Frida.Gadget {
+ 		} else {
+ 			start (request);
+ 		}
++		if (stop_after ("start"))
++			return;
+
+ 		if (result != null) {
+ 			try {
+@@ -560,19 +597,48 @@ namespace Frida.Gadget {
+ 	}
+
+ 	private void start (Gee.Promise<int>? request) {
++		if (stop_after ("start-before-idle-source"))
++			return;
++
+ 		var source = new IdleSource ();
+ 		source.set_callback (() => {
++			if (stop_after ("start-idle-callback"))
++				return false;
++
+ 			perform_start.begin (request);
+ 			return false;
+ 		});
++
++		if (stop_after ("start-before-attach"))
++			return;
++
+ 		source.attach (Environment.get_worker_context ());
+ 	}
+
+ 	private async void perform_start (Gee.Promise<int>? request) {
++		if (stop_after ("perform-start-suspend")) {
++			var source = new TimeoutSource (60000);
++			source.set_callback (perform_start.callback);
++			source.attach (Environment.get_worker_context ());
++			yield;
++			source.destroy ();
++			return;
++		}
++
++		if (stop_after ("perform-start-enter"))
++			return;
++
+ 		worker_ignore_scope = new ThreadIgnoreScope (FRIDA_THREAD);
++		if (stop_after ("perform-start-ignore-scope"))
++			return;
+
+ 		try {
++			if (stop_after ("perform-start-before-controller-start"))
++				return;
++
+ 			yield controller.start ();
++			if (stop_after ("perform-start-after-controller-start"))
++				return;
+
+ 			var server = controller as ControlServer;
+ 			if (server != null) {

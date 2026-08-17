@@ -1,0 +1,7 @@
+/build/
+/bin/
+/deps/
+/releng/__pycache__/
+/releng/modules/frida-gadget-ios/*.dylib
+/releng/modules/frida-gadget-ios/node_modules
+# MyFrida 将 Frida submodules 扁平化为普通源码目录，必须允许正常 git add。

@@ -1,0 +1,605 @@
+[CCode (gir_namespace = "FridaBarebone", gir_version = "1.0")]
+namespace Frida.Barebone {
+	public sealed class AgentConnection : Object, AsyncInitable {
+		public signal void script_message (AgentScriptId id, string json, Bytes? data);
+
+		private Cancellable io_cancellable = new Cancellable ();
+
+		private SocketConnection hostlink;
+		private BufferedInputStream input;
+		private OutputStream output;
+
+		private AgentConfig agent_config;
+		private VsockTransportConfig? vsock_transport;
+		private ImageConfig? image_config;
+		private KernelRelocation? relocation;
+		private uint64 kernel_base;
+		private Machine machine;
+		private Allocator allocator;
+
+		private Allocation elf_allocation;
+		private Allocation config_allocation;
+
+		private Gee.Map<uint16, Promise<Variant>> pending_requests = new Gee.HashMap<uint16, Promise<Variant>> ();
+		private uint16 next_request_id = 1;
+
+		private const int COMMAND_TIMEOUT_MS = 25000;
+
+		public static async AgentConnection open (AgentConfig agent_config, ImageConfig? image_config,
+				KernelRelocation? relocation, uint64 kernel_base, Machine machine, Allocator allocator,
+				Cancellable? cancellable) throws Error, IOError {
+			var connection = new AgentConnection () {
+				agent_config = agent_config,
+				image_config = image_config,
+				relocation = relocation,
+				kernel_base = kernel_base,
+				machine = machine,
+				allocator = allocator,
+			};
+
+			try {
+				yield connection.init_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			return connection;
+		}
+
+		private const uint8 TRANSPORT_KIND_VIRTIO = 0;
+		private const uint8 TRANSPORT_KIND_VSOCK = 1;
+
+		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+			var transport_tag = yield resolve_transport (cancellable);
+
+			var gdb = machine.gdb;
+			ByteOrder byte_order = gdb.byte_order;
+			uint pointer_size = gdb.pointer_size;
+
+			Layout layout;
+			uint64 preferred_base = 0;
+			if (image_config != null) {
+				var payload = yield Img4.parse_file (File.new_for_path (image_config.file), cancellable);
+				var kernelcache = Layout.parse_kernelcache (payload.data);
+				preferred_base = kernelcache.preferred_address;
+				if (relocation != null) {
+					layout = Layout.load_from_module (kernelcache, payload.data, preferred_base, byte_order,
+						pointer_size);
+					rebase_layout (layout, preferred_base, relocation);
+				} else {
+					layout = Layout.load_from_module (kernelcache, payload.data, kernel_base, byte_order,
+						pointer_size);
+				}
+			} else {
+				layout = new Layout.empty ();
+			}
+			if (kernel_base == 0)
+				throw new Error.NOT_SUPPORTED ("Missing kernel_base");
+
+			var symbols = new Gee.HashMap<string, SymbolInfo> ();
+			var hash_builder = new SymbolHashBuilder ();
+			foreach (var s in layout.symbols) {
+				symbols[s.name] = s;
+				hash_builder.add_symbol (s);
+			}
+			if (image_config != null) {
+				foreach (var e in image_config.symbols.entries) {
+					unowned string name = e.key;
+					if (!symbols.has_key (name)) {
+						uint32 offset = (relocation != null)
+							? relocation.runtime_offset (preferred_base + e.value)
+							: (uint32) e.value;
+						var s = new SymbolInfo () {
+							name = name,
+							offset = offset,
+							symbol_type = 0xf,
+							section = 0x10, // FIXME
+						};
+						symbols[name] = s;
+						hash_builder.add_symbol (s);
+					}
+				}
+			}
+
+			SymbolInfo? thread_block = symbols["thread_block"];
+			if (thread_block == null)
+				throw new Error.NOT_SUPPORTED ("Missing symbol for thread_block");
+
+			SymbolInfo? panic = symbols["panic"];
+			if (panic != null && machine is Arm64Machine)
+				((Arm64Machine) machine).call_landing_zone = kernel_base + panic.offset;
+
+			Bytes symbol_data = hash_builder.build (byte_order);
+
+			Gum.ElfModule elf;
+			try {
+				elf = new Gum.ElfModule.from_file (agent_config.path);
+			} catch (Gum.Error e) {
+				throw new Error.INVALID_ARGUMENT ("%s", e.message);
+			}
+
+			var raw_elf = gdb.make_buffer (new Bytes (elf.get_file_data ()));
+			// Slots whose symbol is absent on this kernel are left zero; the agent's
+			// xnu.rs uses Option<fn> and falls back across per-kernel name variants.
+			elf.enumerate_symbols (s => {
+				unowned Gum.ElfSectionDetails? sect = s.section;
+				if (sect != null && sect.name == ".kernel_addrs") {
+					string name = s.name[1:];
+					SymbolInfo? info = symbols[name];
+					if (info != null) {
+						size_t file_offset = (size_t) (sect.offset + (s.address - sect.address));
+						raw_elf.write_pointer (file_offset, kernel_base + info.offset);
+					}
+				}
+				return true;
+			});
+
+			yield machine.enter_exception_level (1, 1000, cancellable);
+
+			yield run_until_thread_block (kernel_base + thread_block.offset, cancellable);
+
+			size_t page_size = yield machine.query_page_size (cancellable);
+
+			yield ((Arm64Machine) machine).learn_permission_templates (kernel_base + thread_block.offset, cancellable);
+
+			elf_allocation = yield inject_elf (elf, raw_elf.bytes, page_size, machine, allocator, cancellable);
+
+			uint64 start_address = 0;
+			uint64 base_va = elf_allocation.virtual_address;
+			elf.enumerate_symbols (e => {
+				if (e.name == "_start")
+					start_address = base_va + e.address;
+				return true;
+			});
+			if (start_address == 0)
+				throw new Error.INVALID_ARGUMENT ("Invalid agent: no _start symbol found");
+
+			var config_builder = new VariantBuilder (new VariantType ("((tt)yvta(ssuuuu)ay)"));
+			config_builder.add ("(tt)", base_va, (uint64) elf_allocation.size);
+			config_builder.add_value (transport_tag.get_child_value (0));
+			config_builder.add_value (transport_tag.get_child_value (1));
+			config_builder.add ("t", kernel_base);
+
+			config_builder.open (new VariantType ("a(ssuuuu)"));
+			foreach (var m in layout.modules) {
+				config_builder.add ("(ssuuuu)",
+					m.name,
+					m.version,
+					m.offset,
+					m.size,
+					m.start_func_offset,
+					m.stop_func_offset
+				);
+			}
+			config_builder.close ();
+
+			config_builder.add_value (Variant.new_from_data (new VariantType ("ay"), symbol_data.get_data (), true,
+				symbol_data));
+
+			var config_blob = config_builder.end ().get_data_as_bytes ();
+			config_allocation = yield allocator.allocate (config_blob.get_size (), 8, cancellable);
+
+			yield gdb.write_byte_array (config_allocation.virtual_address, config_blob, cancellable);
+
+			yield machine.invoke (start_address, {
+					config_allocation.virtual_address,
+					config_allocation.size
+				},
+				cancellable);
+
+			// The vphone research kernel panics on any synchronous exception taken while a
+			// debugger is attached, which the worker hits in the allocator during gum_init.
+			var arm64 = machine as Arm64Machine;
+			bool post_inject_access_uses_bridge = arm64 != null && arm64.physical_memory != null;
+			if (post_inject_access_uses_bridge)
+				yield gdb.detach (cancellable);
+			else
+				yield gdb.continue (cancellable);
+			yield establish_hostlink (cancellable);
+
+			process_incoming_messages.begin ();
+
+			return true;
+		}
+
+		private async void run_until_thread_block (uint64 address, Cancellable? cancellable) throws Error, IOError {
+			var gdb = machine.gdb;
+			var bp = yield gdb.add_breakpoint (SOFT, address, 4, cancellable);
+
+			GDB.Breakpoint? hit = null;
+			do {
+				var exception = yield gdb.continue_until_exception (cancellable);
+				hit = exception.breakpoint;
+			} while (hit != bp);
+
+			yield bp.remove (cancellable);
+		}
+
+		private async Variant resolve_transport (Cancellable? cancellable) throws Error, IOError {
+			if (agent_config.transport is HostlinkTransportConfig)
+				return yield connect_virtio_transport ((HostlinkTransportConfig) agent_config.transport, cancellable);
+			if (agent_config.transport is VsockTransportConfig) {
+				var config = (VsockTransportConfig) agent_config.transport;
+				vsock_transport = config;
+				return new Variant.tuple ({
+					new Variant.byte (TRANSPORT_KIND_VSOCK),
+					new Variant.variant (new Variant.uint32 (config.port))
+				});
+			}
+			throw new Error.NOT_SUPPORTED ("Unsupported transport config");
+		}
+
+		private async void establish_hostlink (Cancellable? cancellable) throws Error, IOError {
+			if (vsock_transport == null)
+				return;
+
+#if WINDOWS
+			throw new Error.NOT_SUPPORTED ("Hostlink transport is not available on this OS");
+#else
+			var address = new UnixSocketAddress (vsock_transport.socket_path);
+			var client = new SocketClient ();
+			while (true) {
+				try {
+					adopt_hostlink_streams (yield client.connect_async (address, cancellable));
+					return;
+				} catch (GLib.Error e) {
+					if (e is IOError.CANCELLED)
+						throw (IOError) e;
+					var source = new TimeoutSource (50);
+					source.set_callback (establish_hostlink.callback);
+					source.attach (MainContext.get_thread_default ());
+					yield;
+				}
+			}
+#endif
+		}
+
+		private async Variant connect_virtio_transport (HostlinkTransportConfig config, Cancellable? cancellable)
+				throws Error, IOError {
+			var qmp = yield QmpClient.open (config.qmp, 0, cancellable);
+			var link = yield qmp.open_hostlink (cancellable);
+			adopt_hostlink_streams (link.connection);
+
+			Variant[] virtio_cfg = { new Variant.uint64 (link.mmio), new Variant.uint32 (link.irq) };
+			return new Variant.tuple ({
+				new Variant.byte (TRANSPORT_KIND_VIRTIO),
+				new Variant.variant (new Variant.tuple (virtio_cfg))
+			});
+		}
+
+		private void adopt_hostlink_streams (SocketConnection connection) {
+			hostlink = connection;
+			input = (BufferedInputStream) Object.new (typeof (BufferedInputStream),
+				"base-stream", hostlink.get_input_stream (),
+				"close-base-stream", false,
+				"buffer-size", 128 * 1024);
+			output = hostlink.get_output_stream ();
+		}
+
+		private void rebase_layout (Layout layout, uint64 preferred_base, KernelRelocation reloc) throws Error {
+			foreach (var s in layout.symbols)
+				s.offset = reloc.runtime_offset (preferred_base + s.offset);
+			foreach (var m in layout.modules) {
+				m.offset = reloc.runtime_offset (preferred_base + m.offset);
+				m.start_func_offset = reloc.runtime_offset (preferred_base + m.start_func_offset);
+				m.stop_func_offset = reloc.runtime_offset (preferred_base + m.stop_func_offset);
+			}
+		}
+
+		public async void close (Cancellable? cancellable) throws IOError {
+			io_cancellable.cancel ();
+		}
+
+		public async AgentScriptId create_script (string source, Cancellable? cancellable) throws Error, IOError {
+			var payload = new Variant ("s", source);
+			var response = yield execute_command (Command.CREATE_SCRIPT, payload, cancellable);
+			if (!response.check_format_string ("u", false))
+				throw new Error.PROTOCOL ("Invalid create_script response format");
+			uint32 script_handle;
+			response.get ("u", out script_handle);
+			return AgentScriptId (script_handle);
+		}
+
+		public async void load_script (AgentScriptId script_id, Cancellable? cancellable) throws Error, IOError {
+			var payload = new Variant ("u", script_id.handle);
+			yield execute_command (Command.LOAD_SCRIPT, payload, cancellable);
+		}
+
+		public async void destroy_script (AgentScriptId script_id, Cancellable? cancellable) throws Error, IOError {
+			var payload = new Variant ("u", script_id.handle);
+			yield execute_command (Command.DESTROY_SCRIPT, payload, cancellable);
+		}
+
+		public async void post_script_message (AgentScriptId script_id, string message, Bytes? data, Cancellable? cancellable)
+				throws Error, IOError {
+			var payload = new Variant ("(us)", script_id.handle, message);
+			// TODO: Include data.
+			yield execute_command (Command.POST_SCRIPT_MESSAGE, payload, cancellable);
+		}
+
+		private async Variant execute_command (Command command, Variant payload, Cancellable? cancellable) throws Error, IOError {
+			uint16 request_id = next_request_id++;
+
+			Bytes frame = frame_message (command, request_id, payload);
+
+			var promise = new Promise<Variant> ();
+			pending_requests[request_id] = promise;
+
+			try {
+				yield output.write_all_async (frame.get_data (), Priority.DEFAULT, cancellable, null);
+			} catch (GLib.Error e) {
+				pending_requests.unset (request_id);
+				throw new Error.TRANSPORT ("%s", e.message);
+			}
+
+			var timeout_source = new TimeoutSource (COMMAND_TIMEOUT_MS);
+			timeout_source.set_callback (() => {
+				Promise<Variant>? p;
+				if (pending_requests.unset (request_id, out p))
+					p.reject (new Error.TIMED_OUT ("Command timed out"));
+				return Source.REMOVE;
+			});
+			timeout_source.attach (MainContext.get_thread_default ());
+
+			try {
+				return yield promise.future.wait_async (cancellable);
+			} finally {
+				timeout_source.destroy ();
+			}
+		}
+
+		private async void process_incoming_messages () {
+			var byte_order = machine.gdb.byte_order;
+
+			try {
+				while (true) {
+					size_t header_size = 4;
+					if (input.get_available () < header_size)
+						yield fill_until_n_bytes_available (header_size);
+
+					uint32 body_size = 0;
+					unowned uint8[] size_buf = ((uint8[]) &body_size)[:4];
+					input.peek (size_buf);
+					body_size = uint32.from_little_endian (body_size);
+
+					size_t full_size = header_size + body_size;
+					if (input.get_available () < full_size)
+						yield fill_until_n_bytes_available (full_size);
+
+					var body = new uint8[body_size];
+					input.peek (body, header_size);
+
+					input.skip (full_size, io_cancellable);
+
+					var raw_message = new Bytes.take ((owned) body);
+
+					var message = Variant.new_from_data (new VariantType ("(yqv)"), raw_message.get_data (), false,
+						raw_message);
+					if (byte_order != ByteOrder.HOST)
+						message = message.byteswap ();
+					if (!message.check_format_string ("(yqv)", false))
+						throw new Error.PROTOCOL ("Invalid message format");
+
+					uint8 command_code;
+					uint16 request_id;
+					Variant payload;
+					message.get ("(yqv)", out command_code, out request_id, out payload);
+
+					if (command_code == Command.SCRIPT_MESSAGE) {
+						if (!payload.check_format_string ("(us)", false))
+							throw new Error.PROTOCOL ("Invalid script message payload format");
+
+						uint32 script_handle;
+						unowned string json;
+						payload.get ("(u&s)", out script_handle, out json);
+
+						script_message (AgentScriptId (script_handle), json, null);
+					} else if (command_code == Command.REMAP_WRITABLE_PAGES) {
+						Variant result;
+						try {
+							result = yield remap_writable_pages (payload, io_cancellable);
+						} catch (Error e) {
+							result = new Variant.uint64 (0);
+						}
+						yield send_reply (request_id, result);
+					} else if (command_code == Command.MEMORY_PROTECT) {
+						Variant result;
+						try {
+							result = yield protect_memory (payload, io_cancellable);
+						} catch (Error e) {
+							result = new Variant.boolean (false);
+						}
+						yield send_reply (request_id, result);
+					} else if (command_code == Command.PATCH_CODE) {
+						Variant result;
+						try {
+							result = yield patch_code (payload, io_cancellable);
+						} catch (Error e) {
+							result = new Variant.boolean (false);
+						}
+						yield send_reply (request_id, result);
+					} else if (command_code == Command.REPLY) {
+						Promise<Variant>? promise;
+						if (pending_requests.unset (request_id, out promise))
+							promise.resolve (payload);
+					}
+				}
+			} catch (GLib.Error e) {
+			}
+		}
+
+		private async void fill_until_n_bytes_available (size_t minimum) throws Error, IOError {
+			size_t available = input.get_available ();
+			while (available < minimum) {
+				if (input.get_buffer_size () < minimum)
+					input.set_buffer_size (minimum);
+
+				ssize_t n;
+				try {
+					n = yield input.fill_async ((ssize_t) (input.get_buffer_size () - available), Priority.DEFAULT,
+						io_cancellable);
+				} catch (GLib.Error e) {
+					throw new Error.TRANSPORT ("Connection closed");
+				}
+
+				if (n == 0)
+					throw new Error.TRANSPORT ("Connection closed");
+
+				available += n;
+			}
+		}
+
+		private async Variant remap_writable_pages (Variant payload, Cancellable? cancellable) throws Error, IOError {
+			var arm64 = (Arm64Machine) machine;
+			var physical_addresses = new Gee.ArrayList<uint64?> ();
+			for (size_t i = 0; i != payload.n_children (); i++) {
+				uint64 va = payload.get_child_value (i).get_uint64 ();
+				physical_addresses.add (yield arm64.translate_address (va, cancellable));
+			}
+
+			Allocation allocation = yield machine.allocate_pages (physical_addresses, cancellable);
+
+			return new Variant.uint64 (allocation.virtual_address);
+		}
+
+		private async Variant protect_memory (Variant payload, Cancellable? cancellable) throws Error, IOError {
+			uint64 address;
+			uint64 size;
+			uint32 prot;
+			payload.get ("(ttu)", out address, out size, out prot);
+
+			yield machine.protect_pages (address, (size_t) size, (Gum.PageProtection) prot, cancellable);
+
+			return new Variant.boolean (true);
+		}
+
+		// CTRR/KTRR locks kernel text read-only against the guest CPU, so the agent cannot patch it
+		// even through a writable alias. The physical-memory bridge writes the backing store directly,
+		// which the lock does not cover, letting us land hooks in kernel and kext text.
+		private async Variant patch_code (Variant payload, Cancellable? cancellable) throws Error, IOError {
+			var arm64 = (Arm64Machine) machine;
+			uint64 va;
+			Variant bytes_value;
+			payload.get ("(t@ay)", out va, out bytes_value);
+			var data = (uint8[]) bytes_value.get_data_as_bytes ().get_data ();
+
+			size_t page_size = yield machine.query_page_size (cancellable);
+			size_t offset = 0;
+			while (offset < data.length) {
+				uint64 page_va = va + offset;
+				uint64 pa = yield arm64.translate_address (page_va, cancellable);
+				size_t chunk = size_t.min (page_size - (size_t) (page_va & (page_size - 1)), data.length - offset);
+				yield arm64.write_physical (pa, data[offset : offset + chunk], cancellable);
+				offset += chunk;
+			}
+
+			return new Variant.boolean (true);
+		}
+
+		private async void send_reply (uint16 request_id, Variant payload) throws GLib.Error {
+			Bytes frame = frame_message (Command.REPLY, request_id, payload);
+			yield output.write_all_async (frame.get_data (), Priority.DEFAULT, io_cancellable, null);
+		}
+
+		private Bytes frame_message (Command command, uint16 request_id, Variant payload) {
+			var message = new Variant ("(yqv)", (uint8) command, request_id, payload);
+			if (machine.gdb.byte_order != ByteOrder.HOST)
+				message = message.byteswap ();
+			var message_bytes = message.get_data_as_bytes ();
+			return machine.gdb.make_buffer_builder ()
+				.append_uint32 ((uint32) message_bytes.get_size ())
+				.append_bytes (message_bytes)
+				.build ();
+		}
+
+		private enum Command {
+			CREATE_SCRIPT = 1,
+			LOAD_SCRIPT = 2,
+			DESTROY_SCRIPT = 3,
+			POST_SCRIPT_MESSAGE = 4,
+			REMAP_WRITABLE_PAGES = 5,
+			MEMORY_PROTECT = 6,
+			PATCH_CODE = 7,
+			REPLY = 128,
+			SCRIPT_MESSAGE = 129
+		}
+
+		private enum Status {
+			IDLE,
+			BUSY,
+			DATA_READY,
+			ERROR
+		}
+	}
+
+	private class SymbolHashBuilder : Object {
+		private Gee.Map<string, Gee.List<SymbolInfo>> symbol_table = new Gee.TreeMap<string, Gee.List<SymbolInfo>> ();
+
+		public void add_symbol (SymbolInfo symbol) {
+			var symbol_list = symbol_table[symbol.name];
+			if (symbol_list == null) {
+				symbol_list = new Gee.ArrayList<SymbolInfo> ();
+				symbol_table[symbol.name] = symbol_list;
+			}
+			symbol_list.add (symbol);
+		}
+
+		public Bytes build (ByteOrder byte_order) {
+			var builder = new BufferBuilder (byte_order);
+
+			var all_symbols = new Gee.ArrayList<SymbolInfo> ();
+			foreach (var entry in symbol_table.entries) {
+				foreach (var symbol in entry.value)
+					all_symbols.add (symbol);
+			}
+
+			uint total_symbols = all_symbols.size;
+			builder.append_uint32 (total_symbols);
+
+			var name_index_offset = builder.offset;
+			builder.skip (total_symbols * 4);
+
+			var addr_index_offset = builder.offset;
+			builder.skip (total_symbols * 4);
+
+			var symbol_offsets = new uint32[total_symbols];
+			for (uint i = 0; i != total_symbols; i++) {
+				var symbol = all_symbols[(int) i];
+
+				builder.align (4);
+				symbol_offsets[i] = (uint32) builder.offset;
+
+				builder.append_uint32 (symbol.offset);
+				// TODO: Only include details we need.
+				builder.append_uint8 (symbol.symbol_type);
+				builder.append_uint8 (symbol.section);
+				builder.append_uint16 (symbol.description);
+				builder.append_string (symbol.name, StringTerminator.NUL);
+			}
+
+			for (uint i = 0; i != total_symbols; i++)
+				builder.write_uint32 (name_index_offset + (i * 4), symbol_offsets[i]);
+
+			var addr_sorted_symbols = new Gee.ArrayList<int> ();
+			for (uint i = 0; i != total_symbols; i++)
+				addr_sorted_symbols.add ((int) i);
+			addr_sorted_symbols.sort ((a, b) => {
+				var symbol_a = all_symbols[a];
+				var symbol_b = all_symbols[b];
+				if (symbol_a.offset < symbol_b.offset)
+					return -1;
+				if (symbol_a.offset > symbol_b.offset)
+					return 1;
+				return 0;
+			});
+
+			for (uint i = 0; i != total_symbols; i++) {
+				int original_index = addr_sorted_symbols[(int) i];
+				uint symbol_data_offset = symbol_offsets[original_index];
+				builder.write_uint32 (addr_index_offset + (i * 4), symbol_data_offset);
+			}
+
+			return builder.build ();
+		}
+	}
+}
