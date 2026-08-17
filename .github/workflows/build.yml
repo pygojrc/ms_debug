@@ -76,10 +76,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p out/android-${{ matrix.arch }}
-          find frida/build -name frida-server -type f -exec cp -f {} out/android-${{ matrix.arch }}/ms_server \;
-          find frida/build -name 'frida-gadget.so' -type f -exec cp -f {} out/android-${{ matrix.arch }}/gadget.so \;
-          find frida/build -name frida-code-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-code-inject \;
-          find frida/build -name frida-so-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-so-inject \;
+          find frida/build -name frida-server -type f -exec cp -f {} out/android-${{ matrix.arch }}/ms_server.android-${{ matrix.arch }} \;
+          find frida/build -name 'frida-gadget.so' -type f -exec cp -f {} out/android-${{ matrix.arch }}/gadget.so.android-${{ matrix.arch }} \;
+          find frida/build -name frida-code-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-code-inject.android-${{ matrix.arch }} \;
+          find frida/build -name frida-so-inject -type f -exec cp -f {} out/android-${{ matrix.arch }}/frida-so-inject.android-${{ matrix.arch }} \;
           echo "=== 收集产物 ==="; ls -la out/android-${{ matrix.arch }}/
 
       - name: Upload artifact
