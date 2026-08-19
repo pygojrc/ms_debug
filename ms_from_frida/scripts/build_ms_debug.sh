@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT_DIR}/config/versions.env"
 SRC="${1:-${ROOT_DIR}/work/frida}"
-SRC="$(cd "${SRC}" && pwd)"
+# The source tree is created by fetch_frida.sh on a clean CI runner, so it
+# may not exist yet. realpath -m canonicalizes it without requiring it.
+SRC="$(realpath -m "${SRC}")"
 TARGET="${FRIDA_TARGET:-${FRIDA_TARGET_DEFAULT}}"
 if [[ -n "${FRIDA_HOSTS:-}" ]]; then
   read -r -a HOSTS <<< "${FRIDA_HOSTS}"
