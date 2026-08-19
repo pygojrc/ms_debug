@@ -7,7 +7,7 @@
 1. Patch 的目标子仓库路径；
 2. `scripts/修补_ms线程名.py` 等新增构建辅助文件；
 3. Android NDK r29、两个目标的 SDK 预构建依赖和 `deps/sdk-android-arm64/lib/`、`deps/sdk-android-x86_64/lib/`；SDK 依赖由 Frida `releng/deps.py sync sdk <host>` 下载，NDK 由 `download_ndk.sh` 下载；它们都不是 Git submodule；
-4. 构建前临时修改 `libglib-2.0.a`、`libgio-2.0.a`，并在退出时恢复；
+4. 默认从源码构建 GLib/GObject/GIO 并覆盖 SDK；仅回退模式临时修改 `libglib-2.0.a`、`libgio-2.0.a`；
 5. `build_android.sh` 的 host/target、Meson build root 和产物复制逻辑；
 6. 子模块 commit 与 `ms_debug` vendored 源码版本的对应关系。
 
@@ -21,7 +21,9 @@
 
 ## `.a` 的处理
 
-`.a` 静态库没有作为源码文件提交；真正的修改发生在构建阶段。`build_android.sh` 在链接前对 SDK 中的 `libglib-2.0.a` 和 `libgio-2.0.a` 执行等长线程名替换，退出时反向恢复。因此复现脚本必须保证：
+默认构建使用 `scripts/build_glib_sdk.sh`：它先保留其它预构建 SDK 依赖，再从固定 GLib 源码应用 `002-glib-gio-thread-name-and-gtask-bisect.patch` 与方案 A 的 `009-glib-descriptive-thread-name.patch` 并编译，最后覆盖 SDK 中的 GLib/GObject/GIO 文件。因此默认路径不再编辑 `.a`，线程名修改直接来自源码编译结果。`010`、`011` 分别接入 Gum Linux worker 和远程 loader。
+
+`.a` 静态库没有作为源码文件提交；只有 `FRIDA_BUILD_GLIB=0` 回退时，`build_android.sh` 才会对 SDK 中的 `libglib-2.0.a` 和 `libgio-2.0.a` 执行等长线程名替换，退出时反向恢复。回退模式必须保证：
 
 - 使用同一份 SDK 静态库；
 - patch 操作具备 `--reverse`；
@@ -53,4 +55,4 @@
 | `frida-core/src/linux/` | helper backend、loader、inject-context、Meson 资源输入 | `008-frida-core-helper-injection.patch` |
 | `frida-core/src/linux/linjector.vala` | memfd 显示名为 `msagent.so` 的最终布局 | `007-frida-core-agent-memfd-name-msagent.patch` |
 | `frida-core/src/linux/helpers/artifacts/native/arm64/` | ARM64 helper payload 和三个 code payload | `files/frida-core/` 复制 overlay |
-| SDK `lib/*.a` | GLib/GIO 线程名修补 | 构建前临时修补，退出恢复 |
+| SDK `lib/*.a` | GLib/GIO 线程名修补 | 默认由源码构建覆盖；回退模式才临时修补并恢复 |
