@@ -2,6 +2,9 @@ name: ms_from_frida build and release
 
 # 仅手动触发。创建或推送本文件不会自动开始构建。
 on:
+  push:
+    branches:
+      - agent/ms-from-frida-workflow-20260819
   workflow_dispatch:
     inputs:
       release_tag:
