@@ -14,16 +14,24 @@ if [[ -e "${DEST}/.git" || -f "${DEST}/.git" ]]; then
   if ! git -C "${DEST}" cat-file -e "${FRIDA_ROOT_COMMIT}^{commit}" 2>/dev/null; then
     git -C "${DEST}" fetch --tags origin
   fi
-  git -C "${DEST}" checkout --detach "${FRIDA_TAG}"
+  # Checkout the immutable commit, not the movable tag.  The tag remains a
+  # human-readable label and is checked below for traceability.
+  git -C "${DEST}" checkout --detach "${FRIDA_ROOT_COMMIT}"
   git -C "${DEST}" submodule update --init --recursive
 else
   mkdir -p "$(dirname "${DEST}")"
   git clone --branch "${FRIDA_TAG}" --recurse-submodules \
     "https://github.com/frida/frida.git" "${DEST}"
+  git -C "${DEST}" checkout --detach "${FRIDA_ROOT_COMMIT}"
+  git -C "${DEST}" submodule update --init --recursive
 fi
 
 [[ "$(git -C "${DEST}" rev-parse HEAD)" == "${FRIDA_ROOT_COMMIT}" ]] || {
   echo "Frida 主仓库 commit 不符合预期" >&2; exit 1;
+}
+TAG_COMMIT="$(git -C "${DEST}" rev-list -n 1 "refs/tags/${FRIDA_TAG}" 2>/dev/null || true)"
+[[ -z "${TAG_COMMIT}" || "${TAG_COMMIT}" == "${FRIDA_ROOT_COMMIT}" ]] || {
+  echo "Frida tag 与锁定 commit 不一致：${FRIDA_TAG} -> ${TAG_COMMIT}" >&2; exit 1;
 }
 git -C "${DEST}" submodule status --recursive
 
@@ -71,6 +79,9 @@ download_prebuilt() {
 # submodules.  They contain the Android SDK .a files and host build tools.
 for host in "${HOSTS[@]}"; do
   download_prebuilt sdk "${host}" "${DEST}/deps/sdk-${host}"
+  if [[ "${FRIDA_BUILD_GLIB:-1}" == "1" ]]; then
+    bash "${ROOT_DIR}/scripts/build_glib_sdk.sh" "${DEST}" "${host}"
+  fi
 done
 download_prebuilt toolchain linux-x86_64 "${DEST}/deps/toolchain-linux-x86_64"
 

@@ -24,6 +24,12 @@ concurrency:
 
 env:
   FRIDA_DOWNLOAD_PREBUILT: "1"
+  # Rebuild the Android helper Dex when the container exposes an Android SDK;
+  # otherwise build_android_helper.sh validates and reuses the checked-in Dex.
+  ANDROID_HELPER_API_LEVEL: "19"
+  # Keep other SDK packages prebuilt, but rebuild GLib/GObject/GIO from the
+  # pinned source plus ms_debug patch 002 before compiling Frida.
+  FRIDA_BUILD_GLIB: "1"
   # NDK is supplied by nttld/setup-ndk below.
   FRIDA_DOWNLOAD_NDK: "0"
 
@@ -51,6 +57,16 @@ jobs:
           ndk-version: r29
           add-to-path: false
 
+      - name: Verify Android helper naming input
+        shell: bash
+        run: |
+          set -euo pipefail
+          dex="ms_from_frida/files/frida-core/src/android-helper/helper.dex"
+          test -s "$dex"
+          dex_strings="$(strings -a "$dex")"
+          grep -Fq 'Jit thread pool worker thread' <<< "$dex_strings"
+          ! grep -Eq 'Connection (Listener|Handler)' <<< "$dex_strings"
+
       - name: Build Frida 17.15.3
         shell: bash
         env:
@@ -74,6 +90,14 @@ jobs:
             file "$output_dir/$output"
             sha256sum "$output_dir/$output"
           done
+          dex="ms_from_frida/work/frida/subprojects/frida-core/src/android-helper/helper.dex"
+          test -s "$dex"
+          dex_strings="$(strings -a "$dex")"
+          grep -Fq 'Jit thread pool worker thread' <<< "$dex_strings"
+          ! grep -Eq 'Connection (Listener|Handler)' <<< "$dex_strings"
+          server_strings="$(strings -a "$output_dir/ms_server")"
+          grep -Fq 'Jit thread pool worker thread' <<< "$server_strings"
+          ! grep -Eq 'Connection (Listener|Handler)' <<< "$server_strings"
           readelf -h "$output_dir/ms_server"
           readelf -d "$output_dir/ms_server" | grep 'Shared library:'
 

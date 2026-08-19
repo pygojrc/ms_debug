@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT_DIR}/config/versions.env"
 SRC="${1:-${ROOT_DIR}/work/frida}"
-SRC="$(cd "${SRC}" && pwd)"
+# The source tree is created by fetch_frida.sh on a clean CI runner, so it
+# may not exist yet. realpath -m canonicalizes it without requiring it.
+SRC="$(realpath -m "${SRC}")"
 TARGET="${FRIDA_TARGET:-${FRIDA_TARGET_DEFAULT}}"
 if [[ -n "${FRIDA_HOSTS:-}" ]]; then
   read -r -a HOSTS <<< "${FRIDA_HOSTS}"
@@ -17,11 +19,12 @@ fi
 command -v git >/dev/null || { echo '缺少 git' >&2; exit 1; }
 command -v make >/dev/null || { echo '缺少 make' >&2; exit 1; }
 
-FRIDA_HOSTS="${HOSTS[*]}" "${ROOT_DIR}/scripts/fetch_frida.sh" "${SRC}"
-"${ROOT_DIR}/scripts/apply_patches.sh" "${SRC}"
+# GLib incremental SDK builds are target builds and therefore need the NDK
+# before fetch_frida.sh invokes releng/deps.py.
 ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-${ROOT_DIR}/toolchains/android-ndk-r29}"
+export ANDROID_NDK_ROOT
 if [[ "${FRIDA_DOWNLOAD_NDK:-1}" != "0" ]]; then
-  "${ROOT_DIR}/scripts/download_ndk.sh" "${ANDROID_NDK_ROOT}"
+  bash "${ROOT_DIR}/scripts/download_ndk.sh" "${ANDROID_NDK_ROOT}"
 fi
 [[ -f "${ANDROID_NDK_ROOT}/source.properties" ]] || {
   echo '依赖和 patch 已准备，但 Android NDK r29 不存在' >&2; exit 1;
@@ -29,6 +32,9 @@ fi
 grep -q '^Pkg.Revision = 29\.' "${ANDROID_NDK_ROOT}/source.properties" || {
   echo '依赖和 patch 已准备，但当前 NDK 不是 r29' >&2; exit 1;
 }
+
+FRIDA_HOSTS="${HOSTS[*]}" "${ROOT_DIR}/scripts/fetch_frida.sh" "${SRC}"
+"${ROOT_DIR}/scripts/apply_patches.sh" "${SRC}"
 for HOST in "${HOSTS[@]}"; do
   cd "${SRC}"
   BUILD_DIR="${SRC}/build/frida-${HOST}"
