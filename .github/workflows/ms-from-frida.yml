@@ -1,0 +1,138 @@
+name: ms_from_frida build and release
+
+# 仅手动触发。创建或推送本文件不会自动开始构建。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Git tag used for the release
+        required: true
+        default: 17.15.3
+        type: string
+      publish_release:
+        description: Create or update the GitHub Release
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ms-from-frida-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  FRIDA_DOWNLOAD_PREBUILT: "1"
+  # NDK is supplied by nttld/setup-ndk below.
+  FRIDA_DOWNLOAD_NDK: "0"
+
+jobs:
+  build:
+    name: Build Android ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    # Frida's CI image contains Meson, Ninja, Vala, GCC, Clang and the
+    # host-side tools required by the 17.15.3 build.
+    container:
+      image: ghcr.io/frida/x-tools-linux-x86_64:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android NDK r29
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Build Frida 17.15.3
+        shell: bash
+        env:
+          FRIDA_HOSTS: android-${{ matrix.arch }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          for target in frida-server frida-gadget frida-code-inject frida-so-inject; do
+            echo "=== Building ${target} ==="
+            FRIDA_TARGET="$target" \
+              bash ms_from_frida/scripts/build_ms_debug.sh ms_from_frida/work/frida
+          done
+
+      - name: Verify output
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="ms_from_frida/work/frida/bin/android-${{ matrix.arch }}"
+          for output in ms_server gadget.so frida-code-inject frida-so-inject; do
+            test -s "$output_dir/$output"
+            file "$output_dir/$output"
+            sha256sum "$output_dir/$output"
+          done
+          readelf -h "$output_dir/ms_server"
+          readelf -d "$output_dir/ms_server" | grep 'Shared library:'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ms-server-android-${{ matrix.arch }}
+          path: ms_from_frida/work/frida/bin/android-${{ matrix.arch }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ms-server-android-*
+          path: release-assets
+
+      - name: Rename release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for arch in arm64 x86_64; do
+            src_dir="release-assets/ms-server-android-${arch}"
+            for pair in \
+              'ms_server:ms_server' \
+              'gadget.so:gadget.so' \
+              'frida-code-inject:frida-code-inject' \
+              'frida-so-inject:frida-so-inject'; do
+              input="${pair%%:*}"
+              output="${pair#*:}"
+              src="$src_dir/$input"
+              test -f "$src"
+              cp "$src" "release/${output}.android-${arch}"
+            done
+          done
+          find release -type f -maxdepth 1 -print -exec file {} \;
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: Frida ${{ inputs.release_tag }} (ms_from_frida)
+          body: |
+            Built from `ms_from_frida` using Frida 17.15.3.
+
+            Targets:
+            - Android ARM64
+            - Android x86_64
+          files: release/*
+          overwrite_files: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
