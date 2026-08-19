@@ -1,0 +1,29 @@
+--- a/src/linux/linjector.vala
++++ b/src/linux/linjector.vala
+@@ -254,12 +254,25 @@
+ 			if (_memfd == null) {
+ 				if (!MemoryFileDescriptor.is_supported ())
+ 					throw new Error.NOT_SUPPORTED ("Kernel too old for memfd support");
+-				FileDescriptor fd = MemoryFileDescriptor.from_bytes (name, blob);
++				FileDescriptor fd = MemoryFileDescriptor.from_bytes (get_memfd_name (name), blob);
+ 				adjust_fd_permissions (fd);
+ 				_memfd = new UnixInputStream (fd.steal (), true);
+ 			}
+ 			return _memfd;
+ 		}
++
++		private static string get_memfd_name (string name) {
++			switch (name) {
++				case "frida-agent-64.so":
++				case "frida-agent-32.so":
++				case "frida-agent-arm64.so":
++				case "frida-agent-arm.so":
++				case "frida-agent.so":
++					return "msagent.so";
++				default:
++					return name;
++			}
++		}
+ 	}
+ 
+ 	private static void adjust_directory_permissions (string path) {

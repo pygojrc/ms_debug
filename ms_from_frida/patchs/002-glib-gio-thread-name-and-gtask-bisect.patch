@@ -1,0 +1,95 @@
+diff --git a/gio/gdbusprivate.c b/gio/gdbusprivate.c
+index 545072b..c243231 100644
+--- a/gio/gdbusprivate.c
++++ b/gio/gdbusprivate.c
+@@ -308,7 +308,7 @@ gdbus_shared_thread_start (SharedThreadData *data)
+ {
+   g_assert (data->thread == NULL);
+
+-  data->thread = g_thread_new ("gdbus",
++  data->thread = g_thread_new ("ms-db",
+                                gdbus_shared_thread_func,
+                                data);
+ }
+diff --git a/gio/gtask.c b/gio/gtask.c
+index d658e56..ce9dbce 100644
+--- a/gio/gtask.c
++++ b/gio/gtask.c
+@@ -640,6 +640,19 @@ static gint tasks_running;
+ static guint task_pool_max_counter;
+ static guint tasks_running_counter;
+
++static gboolean
++my_gadget_stop_after (const gchar * stage)
++{
++  gchar * path;
++  gboolean stop;
++
++  path = g_strconcat ("/data/local/tmp/mygadget.stop.", stage, NULL);
++  stop = g_file_test (path, G_FILE_TEST_EXISTS);
++  g_free (path);
++
++  return stop;
++}
++
+ /* When the task pool fills up and blocks, and the program keeps
+  * queueing more tasks, we will slowly add more threads to the pool
+  * (in case the existing tasks are trying to queue subtasks of their
+@@ -822,15 +835,31 @@ g_task_new (gpointer              source_object,
+   GSource *source;
+
+   task = g_object_new (G_TYPE_TASK, NULL);
++  if (my_gadget_stop_after ("gtask-after-object-new"))
++    return task;
+   task->source_object = source_object ? g_object_ref (source_object) : NULL;
++  if (my_gadget_stop_after ("gtask-after-source-object"))
++    return task;
+   task->cancellable = cancellable ? g_object_ref (cancellable) : NULL;
++  if (my_gadget_stop_after ("gtask-after-cancellable"))
++    return task;
+   task->callback = callback;
++  if (my_gadget_stop_after ("gtask-after-callback"))
++    return task;
+   task->callback_data = callback_data;
++  if (my_gadget_stop_after ("gtask-after-callback-data"))
++    return task;
+   task->context = g_main_context_ref_thread_default ();
++  if (my_gadget_stop_after ("gtask-after-context"))
++    return task;
+
+   source = g_main_current_source ();
++  if (my_gadget_stop_after ("gtask-after-current-source"))
++    return task;
+   if (source)
+     task->creation_time = g_source_get_time (source);
++  if (my_gadget_stop_after ("gtask-after-creation-time"))
++    return task;
+
+   TRACE (GIO_TASK_NEW (task, source_object, cancellable,
+                        callback, callback_data));
+diff --git a/glib/gmain.c b/glib/gmain.c
+index 7333a94..ecec92c 100644
+--- a/glib/gmain.c
++++ b/glib/gmain.c
+@@ -6814,7 +6814,7 @@ glib_worker_start (void)
+
+   glib_worker_running = TRUE;
+
+-  glib_worker_thread = g_thread_new ("gmain", glib_worker_main, NULL);
++  glib_worker_thread = g_thread_new ("ms-gm", glib_worker_main, NULL);
+
+ #ifdef G_OS_UNIX
+   pthread_sigmask (SIG_SETMASK, &prev_mask, NULL);
+diff --git a/glib/gthreadpool.c b/glib/gthreadpool.c
+index 93f3953..916bb2f 100644
+--- a/glib/gthreadpool.c
++++ b/glib/gthreadpool.c
+@@ -1483,7 +1483,7 @@ g_thread_pool_resume_spawner (void)
+   if (!g_thread_pool_has_spawner ())
+     return;
+
+-  spawn_thread = g_thread_new ("pool-spawner",
++  spawn_thread = g_thread_new ("mspl-spawner",
+                                g_thread_pool_spawn_thread, NULL);
+ }
+
