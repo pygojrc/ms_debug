@@ -40,6 +40,10 @@ GLIB_BUILD="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ms-glib-${ARCH}.XXXXXX")"
 GLIB_SRC="${GLIB_BUILD}/src/glib"
 git clone --no-checkout https://github.com/frida/glib.git "${GLIB_SRC}"
 git -C "${GLIB_SRC}" checkout --detach "${GLIB_COMMIT}"
+# deps.py 会读取 FETCH_HEAD；固定 commit checkout 后补齐该元数据。
+if ! git -C "${GLIB_SRC}" rev-parse FETCH_HEAD >/dev/null 2>&1; then
+  git -C "${GLIB_SRC}" fetch . HEAD >/dev/null
+fi
 git -C "${GLIB_SRC}" apply --whitespace=nowarn \
   "${ROOT_DIR}/ms_from_frida/patches/release/thread-name/glib.patch"
 if [[ "${BUILD_TYPE}" == debug ]]; then
