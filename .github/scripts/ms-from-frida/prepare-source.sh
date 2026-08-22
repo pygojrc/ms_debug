@@ -61,7 +61,8 @@ clone_at https://github.com/frida/libiconv.git libiconv "${LIBICONV_COMMIT}"
 clone_at https://github.com/frida/termux-elf-cleaner.git termux-elf-cleaner "${TERMUX_ELF_CLEANER_COMMIT}"
 
 link_dep() {
-  local parent="$1" name="$2" path="${SOURCE_DIR}/subprojects/${parent}/subprojects/${name}"
+  local parent="$1" name="$2"
+  local path="${SOURCE_DIR}/subprojects/${parent}/subprojects/${name}"
   mkdir -p "$(dirname "${path}")"
   [[ -e "${path}" ]] || ln -s "../../${name}" "${path}"
 }
