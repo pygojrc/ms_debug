@@ -1,0 +1,326 @@
+diff --git a/glib/gthread-posix.c b/glib/gthread-posix.c
+index db1d06976eb1d3dc157d827864406e0fe0ac97a8..a157c0aa15ce4d46f65826e925c7f140dfdc84eb 100644
+--- a/glib/gthread-posix.c
++++ b/glib/gthread-posix.c
+@@ -51,6 +51,7 @@
+ #include "gstrfuncs.h"
+ #include "gtestutils.h"
+ #include "gthreadprivate.h"
++#include "ms-thread-name.h"
+ #include "gutils.h"
+ 
+ #include <stdlib.h>
+@@ -1482,15 +1483,7 @@ g_system_thread_exit (void)
+ void
+ g_system_thread_set_name (const gchar *name)
+ {
+-#if defined(HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
+-  pthread_setname_np (name); /* on OS X and iOS */
+-#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID)
+-  pthread_setname_np (pthread_self (), name); /* on Linux and Solaris */
+-#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG)
+-  pthread_setname_np (pthread_self (), "%s", (gchar *) name); /* on NetBSD */
+-#elif defined(HAVE_PTHREAD_SET_NAME_NP)
+-  pthread_set_name_np (pthread_self (), name); /* on FreeBSD, DragonFlyBSD, OpenBSD */
+-#endif
++  ms_thread_name_set_current (name);
+ }
+ 
+ /* {{{1 GMutex and GCond futex implementation */
+diff --git a/glib/gthread.c b/glib/gthread.c
+index 373f24e45403ea69be48125e5c56953ee5421371..70e944e302873b7c8bf045f6b300b104d59f9f20 100644
+--- a/glib/gthread.c
++++ b/glib/gthread.c
+@@ -42,6 +42,7 @@
+ 
+ #include "gthread.h"
+ #include "gthreadprivate.h"
++#include "ms-thread-name.h"
+ 
+ #include <string.h>
+ 
+@@ -1043,17 +1044,16 @@ g_thread_proxy (gpointer data)
+   TRACE (GLIB_THREAD_SPAWNED (thread->thread.func, thread->thread.data,
+                               thread->name));
+ 
+-  if (thread->name)
+-    {
+-      g_system_thread_set_name (thread->name);
+-      g_free (thread->name);
+-      thread->name = NULL;
+-    }
++  g_system_thread_set_name (thread->name);
++  g_free (thread->name);
++  thread->name = NULL;
+ 
+   glib_thread_callbacks->on_thread_realize ();
+ 
+   thread->retval = thread->thread.func (thread->thread.data);
+ 
++  ms_thread_name_unregister_current ();
++
+   return NULL;
+ }
+ 
+diff --git a/glib/meson.build b/glib/meson.build
+index 77e73e6ebd2c785e97fd54457998baa28325b84b..1cc805d43de5c5c8d628ab65fa2eacc44663929d 100644
+--- a/glib/meson.build
++++ b/glib/meson.build
+@@ -199,6 +199,7 @@ glib_sub_headers = files(
+   'glist.h',
+   'gmacros.h',
+   'gmain.h',
++  'ms-thread-name.h',
+   'gmappedfile.h',
+   'gmarkup.h',
+   'gmem.h',
+@@ -290,6 +291,7 @@ glib_sources += files(
+   'glib-private.c',
+   'glist.c',
+   'gmain.c',
++  'ms-thread-name.c',
+   'gmappedfile.c',
+   'gmarkup.c',
+   'gmem.c',
+diff --git a/glib/ms-thread-name.h b/glib/ms-thread-name.h
+new file mode 100644
+index 000000000..000000000
+--- /dev/null
++++ b/glib/ms-thread-name.h
+@@ -0,0 +1,24 @@
++/* GLIB - GLib thread naming integration for ms_debug
++ *
++ * This header is intentionally small.  It is used by Frida/Gum to share the
++ * same logical thread-name registry as GLib-created threads.
++ */
++
++#ifndef __MS_THREAD_NAME_H__
++#define __MS_THREAD_NAME_H__
++
++#include <glib/gtypes.h>
++
++G_BEGIN_DECLS
++
++void     ms_thread_name_set_current             (const gchar *source_name);
++void     ms_thread_name_set_current_for_index   (guint        index,
++                                                  const gchar *source_name);
++void     ms_thread_name_unregister_current      (void);
++gboolean ms_thread_name_lookup                   (guint64      tid,
++                                                  gchar       *buffer,
++                                                  gsize         buffer_size);
++
++G_END_DECLS
++
++#endif /* __MS_THREAD_NAME_H__ */
+diff --git a/glib/ms-thread-name.c b/glib/ms-thread-name.c
+new file mode 100644
+index 000000000..000000000
+--- /dev/null
++++ b/glib/ms-thread-name.c
+@@ -0,0 +1,206 @@
++/* GLIB - GLib thread naming integration for ms_debug
++ *
++ * This is the descriptive naming strategy.  The complete logical name is
++ * retained in a small process-local registry, while POSIX targets receive
++ * the first 15 visible characters required by pthread_setname_np().
++ */
++
++#include "config.h"
++
++#include "ms-thread-name.h"
++
++#include "ghash.h"
++#include "gmem.h"
++#include "gstrfuncs.h"
++#include "gthread.h"
++
++#include <string.h>
++
++#if defined(G_OS_UNIX)
++# include <pthread.h>
++#endif
++
++#if defined(G_OS_LINUX)
++# include <sys/prctl.h>
++# include <sys/syscall.h>
++# include <unistd.h>
++#endif
++
++typedef struct _MsThreadNameRecord MsThreadNameRecord;
++
++struct _MsThreadNameRecord
++{
++  guint64 tid;
++  gchar logical_name[64];
++  gchar source_name[64];
++};
++
++static GHashTable *ms_thread_name_records;
++static GMutex ms_thread_name_lock;
++static gsize ms_thread_name_initialized;
++static gint ms_thread_name_next_index;
++
++static void ms_thread_name_initialize (void);
++static guint ms_thread_name_hash (gconstpointer data);
++static gboolean ms_thread_name_equal (gconstpointer a,
++                                      gconstpointer b);
++static void ms_thread_name_record_free (gpointer data);
++static guint64 ms_thread_name_get_current_tid (void);
++static void ms_thread_name_format (guint index,
++                                   const gchar *source_name,
++                                   gchar logical_name[64],
++                                   gchar os_name[16]);
++static void ms_thread_name_set_os_name (const gchar *name);
++
++static void
++ms_thread_name_initialize (void)
++{
++  if (g_once_init_enter (&ms_thread_name_initialized))
++  {
++    g_mutex_init (&ms_thread_name_lock);
++    ms_thread_name_records = g_hash_table_new_full (ms_thread_name_hash,
++        ms_thread_name_equal, g_free, ms_thread_name_record_free);
++    g_once_init_leave (&ms_thread_name_initialized, 1);
++  }
++}
++
++static guint
++ms_thread_name_hash (gconstpointer data)
++{
++  guint64 value = *(const guint64 *) data;
++
++  return (guint) (value ^ (value >> 32));
++}
++
++static gboolean
++ms_thread_name_equal (gconstpointer a,
++                      gconstpointer b)
++{
++  return *(const guint64 *) a == *(const guint64 *) b;
++}
++
++static void
++ms_thread_name_record_free (gpointer data)
++{
++  g_free (data);
++}
++
++static guint64
++ms_thread_name_get_current_tid (void)
++{
++#if defined(G_OS_LINUX)
++  return (guint64) syscall (SYS_gettid);
++#elif defined(G_OS_UNIX)
++  return (guint64) (guintptr) pthread_self ();
++#else
++  return 0;
++#endif
++}
++
++static void
++ms_thread_name_format (guint index,
++                       const gchar *source_name,
++                       gchar logical_name[64],
++                       gchar os_name[16])
++{
++  g_snprintf (logical_name, 64, "Jit thread pool worker thread %u", index);
++
++  /* Linux and Android accept at most 15 visible bytes.  The descriptive
++   * strategy intentionally keeps the literal prefix and does not invent an
++   * abbreviated alias or move the index to the end. */
++  g_strlcpy (os_name, logical_name, 16);
++
++  (void) source_name;
++}
++
++static void
++ms_thread_name_set_os_name (const gchar *name)
++{
++#if defined(HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
++  (void) pthread_setname_np (name);
++#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID)
++  (void) pthread_setname_np (pthread_self (), name);
++#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG)
++  (void) pthread_setname_np (pthread_self (), "%s", (gchar *) name);
++#elif defined(HAVE_PTHREAD_SET_NAME_NP)
++  (void) pthread_set_name_np (pthread_self (), name);
++#elif defined(G_OS_LINUX)
++  (void) prctl (PR_SET_NAME, name, 0, 0, 0);
++#else
++  (void) name;
++#endif
++}
++
++void
++ms_thread_name_set_current (const gchar *source_name)
++{
++  guint index;
++
++  index = (guint) g_atomic_int_add (&ms_thread_name_next_index, 1);
++  ms_thread_name_set_current_for_index (index, source_name);
++}
++
++void
++ms_thread_name_set_current_for_index (guint index,
++                                      const gchar *source_name)
++{
++  MsThreadNameRecord *record;
++  guint64 *key;
++  gchar os_name[16];
++
++  ms_thread_name_initialize ();
++
++  record = g_new0 (MsThreadNameRecord, 1);
++  record->tid = ms_thread_name_get_current_tid ();
++  ms_thread_name_format (index, source_name, record->logical_name, os_name);
++  g_strlcpy (record->source_name, source_name != NULL ? source_name : "",
++      sizeof (record->source_name));
++
++  key = g_new (guint64, 1);
++  *key = record->tid;
++
++  g_mutex_lock (&ms_thread_name_lock);
++  g_hash_table_replace (ms_thread_name_records, key, record);
++  g_mutex_unlock (&ms_thread_name_lock);
++
++  ms_thread_name_set_os_name (os_name);
++}
++
++void
++ms_thread_name_unregister_current (void)
++{
++  guint64 tid;
++
++  ms_thread_name_initialize ();
++
++  tid = ms_thread_name_get_current_tid ();
++  g_mutex_lock (&ms_thread_name_lock);
++  g_hash_table_remove (ms_thread_name_records, &tid);
++  g_mutex_unlock (&ms_thread_name_lock);
++}
++
++gboolean
++ms_thread_name_lookup (guint64 tid,
++                       gchar *buffer,
++                       gsize buffer_size)
++{
++  MsThreadNameRecord *record;
++  gboolean found = FALSE;
++
++  if (buffer == NULL || buffer_size == 0)
++    return FALSE;
++
++  buffer[0] = '\0';
++  ms_thread_name_initialize ();
++
++  g_mutex_lock (&ms_thread_name_lock);
++  record = g_hash_table_lookup (ms_thread_name_records, &tid);
++  if (record != NULL)
++  {
++    g_strlcpy (buffer, record->logical_name, buffer_size);
++    found = TRUE;
++  }
++  g_mutex_unlock (&ms_thread_name_lock);
++
++  return found;
++}

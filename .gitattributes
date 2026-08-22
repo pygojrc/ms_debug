@@ -1,0 +1,2 @@
+# patch 文件需要保留目标源码的原始缩进和空白，避免 diff --check 误报补丁内容。
+ms_from_frida/patches/** -whitespace
