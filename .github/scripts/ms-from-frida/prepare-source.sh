@@ -30,7 +30,8 @@ SOURCE_DIR="$(realpath -m "${SOURCE_DIR}")"
 HOST="android-${ARCH}"
 
 clone_at() {
-  local url="$1" dir="$2" rev="$3" path="${SOURCE_DIR}/subprojects/${dir}"
+  local url="$1" dir="$2" rev="$3"
+  local path="${SOURCE_DIR}/subprojects/${dir}"
   if [[ ! -d "${path}/.git" && ! -f "${path}/.git" ]]; then
     git clone --no-checkout "${url}" "${path}"
   fi
