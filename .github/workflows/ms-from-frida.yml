@@ -1,6 +1,6 @@
 name: ms_from_frida build and release
 
-# 仅手动触发。创建或推送本文件不会自动开始构建。
+# 仅手动触发；所有构建均通过本工作流完成。
 on:
   workflow_dispatch:
     inputs:
@@ -9,8 +9,16 @@ on:
         required: true
         default: 17.15.3
         type: string
+      build_type:
+        description: 构建类型；release 不含调试日志和二分停止点
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
       publish_release:
-        description: Create or update the GitHub Release
+        description: 仅 release 构建允许创建或更新 GitHub Release
         required: true
         default: true
         type: boolean
@@ -19,32 +27,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: ms-from-frida-${{ inputs.release_tag }}
+  group: ms-from-frida-${{ inputs.release_tag }}-${{ inputs.build_type }}
   cancel-in-progress: false
-
-env:
-  FRIDA_DOWNLOAD_PREBUILT: "1"
-  # Production path: omit Gadget/GTask bisect stop points.
-  FRIDA_DEBUG_BISECT: "0"
-  # Keep PrettyMethod, ELF behavior and g_set_prgname("gogogo"), but disable
-  # 006's MYOBS-only observability logging.
-  FRIDA_GUM_DEBUG_LOGS: "0"
-  # Rebuild the Android helper Dex when the container exposes an Android SDK;
-  # otherwise build_android_helper.sh validates and reuses the checked-in Dex.
-  ANDROID_HELPER_API_LEVEL: "19"
-  # Keep other SDK packages prebuilt, but rebuild GLib/GObject/GIO from the
-  # pinned source plus the production GLib naming patch before compiling Frida;
-  # GLib/GTask bisect patch 002 is opt-in through FRIDA_DEBUG_BISECT.
-  FRIDA_BUILD_GLIB: "1"
-  # NDK is supplied by nttld/setup-ndk below.
-  FRIDA_DOWNLOAD_NDK: "0"
 
 jobs:
   build:
-    name: Build Android ${{ matrix.arch }}
+    name: Build ${{ inputs.build_type }} Android ${{ matrix.arch }}
     runs-on: ubuntu-24.04
-    # Frida's CI image contains Meson, Ninja, Vala, GCC, Clang and the
-    # host-side tools required by the 17.15.3 build.
     container:
       image: ghcr.io/frida/x-tools-linux-x86_64:latest
     strategy:
@@ -63,69 +52,58 @@ jobs:
           ndk-version: r29
           add-to-path: false
 
-      - name: Verify Android helper naming input
-        shell: bash
-        run: |
-          set -euo pipefail
-          dex="ms_from_frida/files/frida-core/src/android-helper/helper.dex"
-          test -s "$dex"
-          dex_strings="$(strings -a "$dex")"
-          grep -Fq 'Jit thread pool worker thread' <<< "$dex_strings"
-          ! grep -Eq 'Connection (Listener|Handler)' <<< "$dex_strings"
-
-      - name: Build Frida 17.15.3
+      - name: Prepare pinned source and patches
         shell: bash
         env:
-          FRIDA_HOSTS: android-${{ matrix.arch }}
+          GITHUB_ACTIONS: "true"
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ms-from-frida/prepare-source.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --arch "${{ matrix.arch }}" \
+            --source "$RUNNER_TEMP/ms-from-frida-${{ matrix.arch }}"
+
+      - name: Build all Android targets
+        shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-          for target in frida-server frida-gadget frida-code-inject frida-so-inject; do
-            echo "=== Building ${target} ==="
-            FRIDA_TARGET="$target" \
-              bash ms_from_frida/scripts/build_ms_debug.sh ms_from_frida/work/frida
-          done
+          bash .github/scripts/ms-from-frida/build-android.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --arch "${{ matrix.arch }}" \
+            --source "$RUNNER_TEMP/ms-from-frida-${{ matrix.arch }}"
 
-      - name: Verify output
+      - name: Verify artifacts and profile gates
         shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
         run: |
           set -euo pipefail
-          output_dir="ms_from_frida/work/frida/bin/android-${{ matrix.arch }}"
-          for output in ms_server gadget.so frida-code-inject frida-so-inject; do
-            test -s "$output_dir/$output"
-            file "$output_dir/$output"
-            sha256sum "$output_dir/$output"
-          done
-          dex="ms_from_frida/work/frida/subprojects/frida-core/src/android-helper/helper.dex"
-          test -s "$dex"
-          dex_strings="$(strings -a "$dex")"
-          grep -Fq 'Jit thread pool worker thread' <<< "$dex_strings"
-          ! grep -Eq 'Connection (Listener|Handler)' <<< "$dex_strings"
-          server_strings="$(strings -a "$output_dir/ms_server")"
-          grep -Fq 'Jit thread pool worker thread' <<< "$server_strings"
-          ! grep -Eq 'Connection (Listener|Handler)' <<< "$server_strings"
-          readelf -h "$output_dir/ms_server"
-          readelf -d "$output_dir/ms_server" | grep 'Shared library:'
+          bash .github/scripts/ms-from-frida/verify-artifacts.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --arch "${{ matrix.arch }}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ms-server-android-${{ matrix.arch }}
-          path: ms_from_frida/work/frida/bin/android-${{ matrix.arch }}/*
+          name: ms-server-${{ inputs.build_type }}-android-${{ matrix.arch }}
+          path: out/${{ inputs.build_type }}/android-${{ matrix.arch }}/*
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish GitHub Release
     needs: build
-    if: ${{ inputs.publish_release }}
+    if: ${{ inputs.publish_release && inputs.build_type == 'release' }}
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download build artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ms-server-android-*
+          pattern: ms-server-release-*
           path: release-assets
 
       - name: Rename release assets
@@ -134,7 +112,7 @@ jobs:
           set -euo pipefail
           mkdir -p release
           for arch in arm64 x86_64; do
-            src_dir="release-assets/ms-server-android-${arch}"
+            src_dir="release-assets/ms-server-release-android-${arch}"
             for pair in \
               'ms_server:ms_server' \
               'gadget.so:gadget.so' \
@@ -147,7 +125,7 @@ jobs:
               cp "$src" "release/${output}.android-${arch}"
             done
           done
-          find release -type f -maxdepth 1 -print -exec file {} \;
+          find release -maxdepth 1 -type f -print -exec file {} \;
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2

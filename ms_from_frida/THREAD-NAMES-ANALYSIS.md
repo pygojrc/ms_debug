@@ -105,13 +105,11 @@ pthread_setname_np()
 
 | Patch | 覆盖内容 | 当前状态 |
 |---|---|---|
-| `001-frida-core-gadget-bisect.patch` | Gadget worker：`frida-gadget` → `mygadget-worker` | 已覆盖 |
-| `002-glib-gio-thread-name-and-gtask-bisect.patch` | `gmain`、`gdbus`、`pool-spawner` | 已覆盖；`pool-%s` 未覆盖 |
-| `004-project-thread-name-patcher-script.patch` | 对预编译 `.a` 中的 `gmain`、`gdbus`、`pool-%s`、`pool-spawner` 做等长替换 | 仅 `FRIDA_BUILD_GLIB=0` 回退模式有效 |
-| `006-frida-gum-runtime-and-pretty-method.patch` | Gum JS scheduler：`gum-js-loop` → `my_loop` | 已覆盖 |
-| `009-glib-descriptive-thread-name.patch` | GLib 统一分配 `Jit thread pool worker thread N`，维护 TID → 完整逻辑名注册表，OS 层设置前 15 个字符 | 方案 A 已覆盖 GLib/Vala/ThreadPool |
-| `010-frida-gum-descriptive-thread-name.patch` | Gum Linux worker 接入注册表；线程枚举优先返回完整逻辑名 | Android/Linux 已覆盖 |
-| `011-frida-core-loader-descriptive-thread-name.patch` | 无 GLib 依赖的远程 loader 设置 `Jit thread pool` 前缀 | Android/Linux loader 已覆盖 |
+| `debug/bisect/frida-core.patch` | Gadget 二分停止点 | 仅 debug |
+| `debug/bisect/glib.patch` | GTask 二分停止点 | 仅 debug |
+| `release/thread-name/glib.patch` | GLib 统一分配 `Jit thread pool worker thread N`，维护 TID → 完整逻辑名注册表 | release 已覆盖 GLib/Vala/ThreadPool |
+| `release/thread-name/frida-gum.patch` | Gum Linux worker 接入注册表；线程枚举优先返回完整逻辑名 | Android/Linux 已覆盖 |
+| `release/thread-name/frida-core.patch` | loader 和 Android helper 使用描述性线程名 | Android/Linux loader/helper 已覆盖 |
 | 其它 patch | 未发现线程名统一替换 | 未覆盖 |
 
 ## 线程名是否具有业务语义
@@ -163,7 +161,7 @@ Apple/Fruity 注入路径存在一个有实际协议语义的例外：
 - `g_system_thread_set_name()` 是统一入口，因此 `gmain`、GDBus、`pool-%s`、pool spawner、Frida main loop、agent、gadget、Vala Thread 等 GLib 创建线程都进入方案 A。
 - Gum Linux 的直接 pthread worker 由 `010` 显式接入；远程 loader 由 `011` 使用无 GLib 依赖的前缀设置。
 - Android/Linux OS 层名称按要求为 `Jit thread pool`；完整编号通过 Gum/GLib 注册表提供。
-- `004` 仍只服务 `FRIDA_BUILD_GLIB=0` 回退模式，不与默认源码构建路径叠加承担方案 A。
+- 旧 `004` 仅是历史的预编译 `.a` 修补记录，不属于当前 workflow。
 - Apple/Fruity `frida-gadget-tcp-<port>` 协议名、Windows 专用线程实现和测试专用线程仍属于明确豁免或单独平台范围。
 
 本报告只统计生产源码路径；GLib、Frida 和 Meson 的测试用例还包含大量测试专用线程名，它们不应被当作 Android 发布产物的运行时线程名。

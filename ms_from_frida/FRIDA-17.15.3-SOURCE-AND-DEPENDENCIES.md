@@ -2,7 +2,7 @@
 
 ## 1. 不可变源码锁定
 
-本项目不再把 tag 作为唯一源码标识。`scripts/fetch_frida.sh` 会直接 checkout 以下 root commit，并在源码准备后再次校验：
+本项目不再把 tag 作为唯一源码标识。Workflow 的 `prepare-source.sh` 会直接 checkout 以下 root commit，并在源码准备后再次校验：
 
 | 项目 | 固定值 |
 |---|---|
@@ -25,13 +25,13 @@ root commit 会进一步锁定官方 Git submodule 的 tree。当前 17.15.3 源
 | `meson.build`、`meson.options` | 顶层工程和 feature 开关 | 选择 gum、core、gadget、server、inject |
 | `subprojects/frida-gum` | Gum 引擎、代码探测/修改、JavaScript runtime | 构建 `frida-gum-1.0`、`frida-gumjs-1.0` 等静态库 |
 | `subprojects/frida-core` | 协议、agent、gadget、server、inject、平台 backend | 生成 `frida-server`、`frida-gadget`、`frida-code-inject`、`frida-so-inject` |
-| `subprojects/glib` | GLib/GObject/GIO 基础库 | 直接参与 gum/core，且受 ms_debug 的 `.a` 线程名修补影响 |
+| `subprojects/glib` | GLib/GObject/GIO 基础库 | 直接参与 gum/core，并由 workflow 始终从源码自构建 |
 | `subprojects/libffi` | FFI 调用支持 | gum/core 间接依赖 |
 | `subprojects/libiconv` | 字符集转换 | GLib 依赖链 |
 | `subprojects/termux-elf-cleaner` | Android ELF 清理辅助 | Android 产物后处理/构建输入 |
 | `releng` | Frida 的依赖下载、Meson 配置、机器文件和构建编排 | 决定 SDK、host toolchain、交叉编译器和 Ninja 的来源 |
-| `deps/sdk-*` | Frida 预构建 Android SDK 静态库、Vala metadata 和工具 | 每个 host 架构一份，当前为 arm64、x86_64 |
-| `deps/toolchain-linux-x86_64` | Linux host 构建工具和 Meson/Ninja/Vala 相关工具 | 在 Linux CI 和本地 Linux 构建使用 |
+| `deps/sdk-*` | Frida Android SDK 静态库、Vala metadata 和工具 | 每个 host 架构一份；GLib/GObject/GIO 会被源码构建结果覆盖 |
+| `deps/toolchain-linux-x86_64` | Linux host 构建工具和 Meson/Ninja/Vala 相关工具 | 由 GitHub Actions 的 Linux CI 使用 |
 
 源码树中可观察到的最终目标包括 `frida-gum-1.0`、`frida-gumjs-1.0`、`frida-agent`、`frida-gadget`、`frida-helper`、`frida-core`、`frida-server`、`frida-inject`、`frida-so-inject` 和 `frida-code-inject`。
 
@@ -85,10 +85,10 @@ Android NDK r29 / Clang / lld / sysroot
 
 ## 6. 与 ms_debug 复现流程的关系
 
-1. `fetch_frida.sh` 下载并锁定 root commit、递归 submodule 和额外固定依赖。
+1. Workflow 的 `prepare-source.sh` 下载并锁定 root commit、递归 submodule 和额外固定依赖。
 2. `releng/deps.py sync sdk <host>` 下载对应 SDK bundle，另行下载 Linux host toolchain。
-3. `apply_patches.sh` 按子仓库路径应用 patch，并复制无法由文本 patch 表示的 ARM64 helper payload。
-4. `build_android.sh` 以 NDK r29 配置 Meson，临时修补 SDK 中的 GLib/GIO `.a`，编译目标后恢复原文件。
-5. `copy_outputs.sh` 收集目标产物；`compare_outputs.sh` 通过 ELF/ABI/依赖/符号/行为层级核对，而不是只比较 SHA-256。
+3. `prepare-source.sh` 按子仓库路径应用 release/debug patch，并复制无法由文本 patch 表示的 helper 资源。
+4. Workflow 的 `build-android.sh` 始终从 GLib 固定源码构建 SDK，再一次性构建四类 Android 目标。
+5. Workflow 的 `verify-artifacts.sh` 检查 ELF、关键功能字符串和 release/debug profile 门禁。
 
 源码锁定配置位于 `config/versions.env`；如果升级 Frida，应同时更新 root commit、submodule/依赖 commit、patch 适用性和本文件的分析结论。

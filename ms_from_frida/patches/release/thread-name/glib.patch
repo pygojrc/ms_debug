@@ -1,0 +1,84 @@
+diff --git a/glib/gthread-posix.c b/glib/gthread-posix.c
+index db1d06976eb1d3dc157d827864406e0fe0ac97a8..a157c0aa15ce4d46f65826e925c7f140dfdc84eb 100644
+--- a/glib/gthread-posix.c
++++ b/glib/gthread-posix.c
+@@ -51,6 +51,7 @@
+ #include "gstrfuncs.h"
+ #include "gtestutils.h"
+ #include "gthreadprivate.h"
++#include "ms-thread-name.h"
+ #include "gutils.h"
+ 
+ #include <stdlib.h>
+@@ -1482,15 +1483,7 @@ g_system_thread_exit (void)
+ void
+ g_system_thread_set_name (const gchar *name)
+ {
+-#if defined(HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
+-  pthread_setname_np (name); /* on OS X and iOS */
+-#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID)
+-  pthread_setname_np (pthread_self (), name); /* on Linux and Solaris */
+-#elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG)
+-  pthread_setname_np (pthread_self (), "%s", (gchar *) name); /* on NetBSD */
+-#elif defined(HAVE_PTHREAD_SET_NAME_NP)
+-  pthread_set_name_np (pthread_self (), name); /* on FreeBSD, DragonFlyBSD, OpenBSD */
+-#endif
++  ms_thread_name_set_current (name);
+ }
+ 
+ /* {{{1 GMutex and GCond futex implementation */
+diff --git a/glib/gthread.c b/glib/gthread.c
+index 373f24e45403ea69be48125e5c56953ee5421371..70e944e302873b7c8bf045f6b300b104d59f9f20 100644
+--- a/glib/gthread.c
++++ b/glib/gthread.c
+@@ -42,6 +42,7 @@
+ 
+ #include "gthread.h"
+ #include "gthreadprivate.h"
++#include "ms-thread-name.h"
+ 
+ #include <string.h>
+ 
+@@ -1043,17 +1044,16 @@ g_thread_proxy (gpointer data)
+   TRACE (GLIB_THREAD_SPAWNED (thread->thread.func, thread->thread.data,
+                               thread->name));
+ 
+-  if (thread->name)
+-    {
+-      g_system_thread_set_name (thread->name);
+-      g_free (thread->name);
+-      thread->name = NULL;
+-    }
++  g_system_thread_set_name (thread->name);
++  g_free (thread->name);
++  thread->name = NULL;
+ 
+   glib_thread_callbacks->on_thread_realize ();
+ 
+   thread->retval = thread->thread.func (thread->thread.data);
+ 
++  ms_thread_name_unregister_current ();
++
+   return NULL;
+ }
+ 
+diff --git a/glib/meson.build b/glib/meson.build
+index 77e73e6ebd2c785e97fd54457998baa28325b84b..1cc805d43de5c5c8d628ab65fa2eacc44663929d 100644
+--- a/glib/meson.build
++++ b/glib/meson.build
+@@ -199,6 +199,7 @@ glib_sub_headers = files(
+   'glist.h',
+   'gmacros.h',
+   'gmain.h',
++  'ms-thread-name.h',
+   'gmappedfile.h',
+   'gmarkup.h',
+   'gmem.h',
+@@ -290,6 +291,7 @@ glib_sources += files(
+   'glib-private.c',
+   'glist.c',
+   'gmain.c',
++  'ms-thread-name.c',
+   'gmappedfile.c',
+   'gmarkup.c',
+   'gmem.c',

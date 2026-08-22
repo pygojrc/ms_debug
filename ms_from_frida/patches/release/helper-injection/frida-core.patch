@@ -1,0 +1,444 @@
+diff --git a/inject/meson.build b/inject/meson.build
+index 713c731c1f3fbf5b5e6008e6c6af596eee16f240..6c7d1297594e7ecd941acfa88601c354af181bda 100644
+--- a/inject/meson.build
++++ b/inject/meson.build
+@@ -3,6 +3,16 @@ inject_sources = [
+   'inject-glue.c',
+ ]
+ 
++so_inject_sources = [
++  'so-inject.vala',
++  'inject-glue.c',
++]
++
++code_inject_sources = [
++  'code-inject.vala',
++  'inject-glue.c',
++]
++
+ system_vala_args = []
+ if host_os_family != 'windows'
+   system_vala_args += ['--pkg=posix']
+@@ -15,6 +25,20 @@ raw_inject = executable('frida-inject-raw', inject_sources,
+   dependencies: [json_glib_dep, core_dep],
+ )
+ 
++raw_so_inject = executable('frida-so-inject-raw', so_inject_sources,
++  vala_args: [core_vala_args, system_vala_args],
++  link_args: executable_no_exports_link_args,
++  link_depends: executable_no_exports_link_depends,
++  dependencies: [core_dep],
++)
++
++raw_code_inject = executable('frida-code-inject-raw', code_inject_sources,
++  vala_args: [core_vala_args, system_vala_args],
++  link_args: executable_no_exports_link_args,
++  link_depends: executable_no_exports_link_depends,
++  dependencies: [core_dep],
++)
++
+ custom_target('frida-inject',
+   input: [raw_inject, 'frida-inject.xcent'],
+   output: 'frida-inject' + exe_suffix,
+@@ -22,3 +46,19 @@ custom_target('frida-inject',
+   install: true,
+   install_dir: get_option('bindir'),
+ )
++
++custom_target('frida-so-inject',
++  input: [raw_so_inject, 'frida-inject.xcent'],
++  output: 'frida-so-inject' + exe_suffix,
++  command: post_process + ['executable', 're.frida.SoInject', '@INPUT1@'],
++  install: true,
++  install_dir: get_option('bindir'),
++)
++
++custom_target('frida-code-inject',
++  input: [raw_code_inject, 'frida-inject.xcent'],
++  output: 'frida-code-inject' + exe_suffix,
++  command: post_process + ['executable', 're.frida.CodeInject', '@INPUT1@'],
++  install: true,
++  install_dir: get_option('bindir'),
++)
+diff --git a/src/linux/frida-helper-backend-types.c b/src/linux/frida-helper-backend-types.c
+index 9513fa3b540a056346c295ee48acf9b8aed1ae50..b92acd7fda69ed259cea401a8b74d8001e90a17f 100644
+--- a/src/linux/frida-helper-backend-types.c
++++ b/src/linux/frida-helper-backend-types.c
+@@ -3,5 +3,6 @@
+ 
+ G_STATIC_ASSERT (sizeof (FridaHelperBootstrapContext) == sizeof (FridaBootstrapContext));
+ G_STATIC_ASSERT (sizeof (FridaHelperLoaderContext) == sizeof (FridaLoaderContext));
++G_STATIC_ASSERT (sizeof (FridaHelperCodeContext) == sizeof (FridaCodeContext));
+ G_STATIC_ASSERT (sizeof (FridaHelperLibcApi) == sizeof (FridaLibcApi));
+ G_STATIC_ASSERT (sizeof (FridaHelperByeMessage) == sizeof (FridaByeMessage));
+diff --git a/src/linux/frida-helper-backend.vala b/src/linux/frida-helper-backend.vala
+index b5915011250c31df0ce3328ca6a209af630021ce..44ce338f9dc28640a2b1fdc4f6fa360db140a38a 100644
+--- a/src/linux/frida-helper-backend.vala
++++ b/src/linux/frida-helper-backend.vala
+@@ -305,6 +305,36 @@ namespace Frida {
+ 			take_agent (agent);
+ 		}
+ 
++		public async void inject_code_blob (uint pid, uint8[] code, string data, Cancellable? cancellable)
++				throws Error, IOError {
++			var task = new InjectCodeTask (this, code, data);
++			yield perform<Object> (task, pid, cancellable);
++		}
++
++		public async void inject_hello_code (uint pid, string data, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_hello_bin_blob ().data, data, cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Code-only hello injection is only supported on arm64");
++#endif
++		}
++
++		public async void inject_exec_code (uint pid, string command, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_exec_bin_blob ().data, command, cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Code-only exec injection is only supported on arm64");
++#endif
++		}
++
++		public async void inject_commercial_wrapper_code (uint pid, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_commercial_wrapper_bin_blob ().data, "", cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Commercial wrapper code injection is only supported on arm64");
++#endif
++		}
++
+ 		private class InjectTask : Object, Task<RemoteAgent> {
+ 			private weak LinuxHelperBackend backend;
+ 			private InjectSpec spec;
+@@ -336,6 +366,49 @@ namespace Frida {
+ 			}
+ 		}
+ 
++		private class InjectCodeTask : Object, Task<Object> {
++			private weak LinuxHelperBackend backend;
++			private uint8[] code;
++			private string data;
++
++			public InjectCodeTask (LinuxHelperBackend backend, uint8[] code, string data) {
++				this.backend = backend;
++				this.code = code;
++				this.data = data;
++			}
++
++			public async Object run (uint pid, Cancellable? cancellable) throws Error, IOError {
++				PausedSyscallSession? pss = backend.paused_syscalls[pid];
++				if (pss != null)
++					yield pss.interrupt (cancellable);
++
++				var session = yield InjectSession.open (pid, cancellable);
++				try {
++					yield session.inject_code (code, data, cancellable);
++				} catch (Error e) {
++					try {
++						session.close ();
++					} catch (Error close_error) {
++					}
++					throw e;
++				} catch (IOError e) {
++					try {
++						session.close ();
++					} catch (Error close_error) {
++					}
++					throw e;
++				}
++
++				try {
++					session.close ();
++				} catch (Error e) {
++					throw_api_error (e);
++				}
++
++				return this;
++			}
++		}
++
+ 		public async IOStream request_control_channel (uint id, Cancellable? cancellable) throws Error, IOError {
+ 			RemoteAgent agent = agents[id];
+ 			if (agent == null)
+@@ -924,6 +997,49 @@ namespace Frida {
+ 			}
+ 		}
+ 
++		public async void inject_code (uint8[] code, string data, Cancellable? cancellable) throws Error, IOError {
++			CodeLayout code_layout = compute_code_layout (code, data);
++			BootstrapResult bootstrap_result = yield bootstrap (code_layout.size, cancellable);
++			uint64 code_base = (uintptr) bootstrap_result.context.allocation_base;
++
++			try {
++				write_memory (code_base, code);
++				maybe_fixup_helper_code (code_base, code);
++
++				var code_ctx = HelperCodeContext ();
++				code_ctx.data = (string *) (code_base + code_layout.data_offset);
++				code_ctx.libc = (HelperLibcApi *) (code_base + code_layout.libc_api_offset);
++				write_memory (code_base + code_layout.ctx_offset, (uint8[]) &code_ctx);
++				write_memory (code_base + code_layout.libc_api_offset, (uint8[]) &bootstrap_result.libc);
++				write_memory_string (code_base + code_layout.data_offset, data);
++
++				GPRegs regs = saved_regs;
++				regs.stack_pointer = bootstrap_result.allocated_stack.stack_root;
++				var call_builder = new RemoteCallBuilder (code_base, regs);
++				call_builder.add_argument (code_base + code_layout.ctx_offset);
++				RemoteCallResult code_result = yield call_builder.build (this).execute (cancellable);
++				if (code_result.status != RemoteCallStatus.COMPLETED) {
++					uint64 pc = code_result.regs.program_counter;
++					if (pc >= code_base && pc < code_base + code.length) {
++						throw new Error.NOT_SUPPORTED (
++							"Code payload crashed with signal %d at offset 0x%x\n%s",
++							code_result.stop_signal,
++							(uint) (pc - code_base),
++							code_result.regs.to_string ());
++					}
++					throw new Error.NOT_SUPPORTED ("Code payload crashed with signal %d\n%s",
++						code_result.stop_signal,
++						code_result.regs.to_string ());
++				}
++			} finally {
++				try {
++					yield deallocate_memory ((uintptr) bootstrap_result.libc.munmap, code_base,
++						bootstrap_result.context.allocation_size, null);
++				} catch (GLib.Error e) {
++				}
++			}
++		}
++
+ 		public async RemoteAgent rejuvenate (RemoteAgent old_agent, Cancellable? cancellable) throws Error, IOError {
+ 			InjectSpec spec = old_agent.inject_spec;
+ 			BootstrapResult bootstrap_result = old_agent.bootstrap_result;
+@@ -998,6 +1114,34 @@ namespace Frida {
+ 			return layout;
+ 		}
+ 
++		private struct CodeLayout {
++			public size_t size;
++
++			public size_t ctx_offset;
++			public size_t libc_api_offset;
++			public size_t data_offset;
++		}
++
++		private CodeLayout compute_code_layout (uint8[] code, string data) {
++			var layout = CodeLayout ();
++
++			size_t code_size = round_size_to_page_size (code.length);
++
++			size_t data_size = 0;
++			data_size += sizeof (HelperCodeContext);
++			data_size += sizeof (HelperLibcApi);
++			data_size += data.data.length + 1;
++			data_size = round_size_to_page_size (data_size);
++
++			layout.size = code_size + data_size;
++
++			layout.ctx_offset = code_size;
++			layout.libc_api_offset = layout.ctx_offset + sizeof (HelperCodeContext);
++			layout.data_offset = layout.libc_api_offset + sizeof (HelperLibcApi);
++
++			return layout;
++		}
++
+ 		private async RemoteAgent launch_loader (LoaderLaunch launch, InjectSpec spec, BootstrapResult bres,
+ 				UnixConnection? agent_ctrl, string fallback_address, LoaderLayout loader_layout, Cancellable? cancellable)
+ 				throws Error, IOError {
+@@ -1755,6 +1899,11 @@ namespace Frida {
+ 		void * agent_entrypoint_impl;
+ 	}
+ 
++	protected struct HelperCodeContext {
++		string * data;
++		HelperLibcApi * libc;
++	}
++
+ 	protected struct HelperLibcApi {
+ 		void * printf;
+ 		void * sprintf;
+@@ -2645,7 +2794,7 @@ namespace Frida {
+ 			bool restored = false;
+ 			try {
+ 				session.resume ();
+-				sig = yield session.wait_for_signals ({ SEGV, STOP }, cancellable);
++				sig = yield session.wait_for_signals ({ SEGV, BUS, STOP }, cancellable);
+ 
+ 				session.get_regs (&result_regs);
+ 
+diff --git a/src/linux/helpers/inject-context.h b/src/linux/helpers/inject-context.h
+index b44f06cf9ab26eedd1b37d4ba317da73e712ea2d..062b99a9bf1dc8bb10c4553b2b053fdac4dc1653 100644
+--- a/src/linux/helpers/inject-context.h
++++ b/src/linux/helpers/inject-context.h
+@@ -21,6 +21,7 @@ struct sockaddr;
+ 
+ typedef size_t FridaBootstrapStatus;
+ typedef struct _FridaBootstrapContext FridaBootstrapContext;
++typedef struct _FridaCodeContext FridaCodeContext;
+ typedef struct _FridaLoaderContext FridaLoaderContext;
+ typedef struct _FridaLibcApi FridaLibcApi;
+ typedef uint8_t FridaMessageType;
+@@ -69,6 +70,12 @@ struct _FridaLoaderContext
+   void (* agent_entrypoint_impl) (const char * data, int * unload_policy, void * injector_state);
+ };
+ 
++struct _FridaCodeContext
++{
++  const char * data;
++  FridaLibcApi * libc;
++};
++
+ struct _FridaLibcApi
+ {
+   int (* printf) (const char * format, ...);
+diff --git a/src/linux/helpers/loader.c b/src/linux/helpers/loader.c
+index 032232ed7e3f367049d4a58b3e0caac5b8eb5822..f19d1a76a83bfea5bd5e629e64999be3c25575a8 100644
+--- a/src/linux/helpers/loader.c
++++ b/src/linux/helpers/loader.c
+@@ -131,9 +131,16 @@ frida_main (void * user_data)
+       agent_codefd = -1;
+     }
+ 
+-    ctx->agent_entrypoint_impl = libc->dlsym (ctx->agent_handle, ctx->agent_entrypoint, pretend_caller_addr);
+-    if (ctx->agent_entrypoint_impl == NULL)
+-      goto dlsym_failed;
++    if (ctx->agent_entrypoint[0] != '\0')
++    {
++      ctx->agent_entrypoint_impl = libc->dlsym (ctx->agent_handle, ctx->agent_entrypoint, pretend_caller_addr);
++      if (ctx->agent_entrypoint_impl == NULL)
++        goto dlsym_failed;
++    }
++    else
++    {
++      unload_policy = FRIDA_UNLOAD_POLICY_RESIDENT;
++    }
+   }
+ 
+   agent_ctrlfd = frida_receive_fd (ctrlfd, libc);
+@@ -148,7 +155,8 @@ frida_main (void * user_data)
+   injector_state.frida_ctrlfd = ctrlfd;
+   injector_state.agent_ctrlfd = agent_ctrlfd;
+ 
+-  ctx->agent_entrypoint_impl (ctx->agent_data, &unload_policy, &injector_state);
++  if (ctx->agent_entrypoint_impl != NULL)
++    ctx->agent_entrypoint_impl (ctx->agent_data, &unload_policy, &injector_state);
+ 
+   ctrlfd = injector_state.frida_ctrlfd;
+   agent_ctrlfd = injector_state.agent_ctrlfd;
+diff --git a/src/linux/helpers/meson.build b/src/linux/helpers/meson.build
+index 32b7865e5499edc4467ff41664c118477fa91274..e1597b2ddab537bd84060667fde42d30339dee6e 100644
+--- a/src/linux/helpers/meson.build
++++ b/src/linux/helpers/meson.build
+@@ -87,6 +87,48 @@ custom_target('loader-bin',
+   install: true,
+ )
+ 
++code_hello = shared_module('code-hello', ['code-hello.c', 'syscall.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-hello-bin',
++  input: [code_hello],
++  output: ['code-hello.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
++code_exec = shared_module('code-exec', ['code-exec.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-exec-bin',
++  input: [code_exec],
++  output: ['code-exec.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
++code_commercial_wrapper = shared_module('code-commercial-wrapper', ['code-commercial-wrapper.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-commercial-wrapper-bin',
++  input: [code_commercial_wrapper],
++  output: ['code-commercial-wrapper.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
+ if host_machine.system() == 'android'
+   zymbiote_flags = []
+   if host_machine.cpu_family() == 'aarch64'
+diff --git a/src/meson.build b/src/meson.build
+index ccc4f4e19edf6f929a45bd223b2b6a2dc260317c..64f4107c8644e9cb2212807dfdeed8ae7b863edd 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -381,15 +381,35 @@ if have_local_backend
+     helpers_native_dir = helpers_artifacts_dir / 'native' / host_lowlevel_abi
+     helpers_bpf_noarch_dir = helpers_artifacts_dir / 'bpf' / ('noarch-' + host_machine.endian())
+     helpers_bpf_arch_dir = helpers_artifacts_dir / 'bpf' / bpf_arch
++    helper_backend_inputs = [
++      'linux' / 'frida-helper-backend.resources',
++      helpers_native_dir / 'bootstrapper.bin',
++      helpers_native_dir / 'loader.bin',
++      helpers_bpf_noarch_dir  / 'activity-sampler.elf',
++      helpers_bpf_arch_dir  / 'spawn-gater.elf',
++      helpers_bpf_arch_dir  / 'syscall-tracer.elf',
++    ]
++    helper_backend_input_args = [
++      '@INPUT1@',
++      '@INPUT2@',
++      '@INPUT3@',
++      '@INPUT4@',
++      '@INPUT5@',
++    ]
++    if host_lowlevel_abi == 'arm64'
++      helper_backend_inputs += [
++        helpers_native_dir / 'code-hello.bin',
++        helpers_native_dir / 'code-exec.bin',
++        helpers_native_dir / 'code-commercial-wrapper.bin',
++      ]
++      helper_backend_input_args += [
++        '@INPUT6@',
++        '@INPUT7@',
++        '@INPUT8@',
++      ]
++    endif
+     helper_backend_data = custom_target('frida-data-helper-backend',
+-      input: [
+-        'linux' / 'frida-helper-backend.resources',
+-        helpers_native_dir / 'bootstrapper.bin',
+-        helpers_native_dir / 'loader.bin',
+-        helpers_bpf_noarch_dir  / 'activity-sampler.elf',
+-        helpers_bpf_arch_dir  / 'spawn-gater.elf',
+-        helpers_bpf_arch_dir  / 'syscall-tracer.elf',
+-      ],
++      input: helper_backend_inputs,
+       output: [
+         'frida-data-helper-backend.vapi',
+         'frida-data-helper-backend.h',
+@@ -400,12 +420,7 @@ if have_local_backend
+         resource_compiler_cmd_array,
+         '-c', '@INPUT0@',
+         '-o', meson.current_build_dir() / 'frida-data-helper-backend',
+-        '@INPUT1@',
+-        '@INPUT2@',
+-        '@INPUT3@',
+-        '@INPUT4@',
+-        '@INPUT5@',
+-      ],
++      ] + helper_backend_input_args,
+     )
+     helper_backend_sources += [helper_backend_data]
+     helper_backend_extra_deps = []

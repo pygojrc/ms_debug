@@ -1,4 +1,7 @@
-name: build-android
+# 历史归档：此文件不在 .github/workflows/ 下，不会被 GitHub Actions 执行。
+# 当前唯一构建入口是 .github/workflows/ms-from-frida.yml。
+
+name: build-android (legacy)
 
 # 触发：推送到 main（仅构建验证）；推送 tag（构建并发布到 releases）；手动触发（仅构建）
 on:

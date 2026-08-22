@@ -2,7 +2,7 @@
 
 ## 结论摘要
 
-本次复核基于当前锁定的 Frida 17.15.3 / GLib 快照、已应用的 `001–011` patch，以及已经构建的 Android `arm64`、`x86_64` 产物。
+本次复核基于当前锁定的 Frida 17.15.3 / GLib 快照、已应用的分类 patch，以及 Android `arm64`、`x86_64` 目标设计。
 
 需要区分两个问题：
 
@@ -11,7 +11,7 @@
 
 结论如下：
 
-- 默认 `FRIDA_BUILD_GLIB=1` 时，所有经过 GLib `GThread` 入口的 Frida、GIO、GDBus、GTask、GThreadPool、Vala `Thread<T>` 线程，最终都会进入 `ms_thread_name_set_current()`，OS 名被设置为 `Jit thread pool` 前 15 个字符。
+- 默认 release 时，所有经过自构建 GLib `GThread` 入口的 Frida、GIO、GDBus、GTask、GThreadPool、Vala `Thread<T>` 线程，最终都会进入 `ms_thread_name_set_current()`，OS 名被设置为 `Jit thread pool` 前 15 个字符。
 - 因此，`frida-main-loop`、`frida-agent-container`、`frida-eternal-agent`、`pool-%s`、`mygadget-worker` 等旧名字虽然仍保留在源码/二进制中作为 source name、调试信息或格式字符串，但不会作为这些 native GLib 线程的最终 OS 名。
 - 在 `012` 实施前，仍然实际绕过当前方案的 Android 固定名是 Java Android helper 的 `Connection Listener` 和 `Connection Handler`；现在已由 `012` 接入统一命名，但必须重新生成 `helper.dex` 才会进入最终产物。
 - 原始 `clone()`、非 Android Fruity/QNX 的直接 `pthread_create()` 仍没有统一命名；它们不进入当前 Android server/gadget 的主要 native 线程路径，但属于完整源码树中的未覆盖点。
@@ -188,21 +188,9 @@ private static Thread createWorker(final String role, final Runnable task) {
 - `tools/resource-compiler.vala`、Fruity kperf `ThreadPool`：构建工具或 Apple 专用运行时。
 - `tests/` 下的大量 `*-test-*`、`named-sleeper` 等：测试专用，不应当作为发布产物覆盖率判断。
 
-## `FRIDA_BUILD_GLIB=0` 回退模式的注意事项
+## 构建 profile 约束
 
-当前 Scheme A 的完整结论只适用于默认源码构建 GLib：
-
-```bash
-FRIDA_BUILD_GLIB=1
-```
-
-如果设置 `FRIDA_BUILD_GLIB=0`：
-
-- `009` 不会进入预构建 GLib；
-- `010` 的 GLib registry 依赖可能关闭；
-- `011` 仍可覆盖 loader；
-- `004` 只对预编译 `.a` 做有限的等长字符串替换，不能替代 GLib 统一入口；
-- 因此 `pool-%s`、GLib/Vala 线程和部分固定 source name 不能宣称已完整进入 Scheme A。
+当前 workflow 不支持 `FRIDA_BUILD_GLIB=0` 回退。GLib/GObject/GIO 始终从固定源码构建，release 使用线程名 patch，debug 额外使用二分 patch；不再对预编译 `.a` 做等长字符串替换。
 
 ## 最终覆盖结论
 

@@ -1,0 +1,207 @@
+diff --git a/gum/backend-arm64/guminterceptor-arm64.c b/gum/backend-arm64/guminterceptor-arm64.c
+index cebda3c9cbe757228f83480afbf1b9a91b65b023..1b8cf588b019d07b21277c6818992bfe467daa19 100644
+--- a/gum/backend-arm64/guminterceptor-arm64.c
++++ b/gum/backend-arm64/guminterceptor-arm64.c
+@@ -24,8 +24,14 @@
+ # include <mach-o/loader.h>
+ # include <stdlib.h>
+ #endif
++#ifdef HAVE_ANDROID
++# include <dlfcn.h>
++# include <string.h>
++#endif
++
+ 
+ #define GUM_INTERCEPTOR_FULL_REDIRECT_SIZE 16
++#define GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE 24
+ 
+ #define GUM_ARM64_LOGICAL_PAGE_SIZE 4096
+ 
+@@ -91,6 +97,45 @@ static void gum_emit_leave_thunk (GumArm64Writer * aw, arm64_reg scratch_reg);
+ static void gum_emit_prolog (GumArm64Writer * aw);
+ static void gum_emit_epilog (GumArm64Writer * aw, arm64_reg scratch_reg);
+ 
++#ifdef HAVE_ANDROID
++static gboolean gum_is_art_pretty_method (gpointer function_address);
++#endif
++
++#ifdef HAVE_ANDROID
++
++static gboolean
++gum_is_art_pretty_method (gpointer function_address)
++{
++  Dl_info info;
++  const gchar * module_name;
++  const gchar * symbol_name;
++  gboolean matched;
++
++  if (dladdr (function_address, &info) == 0)
++  {
++    return FALSE;
++  }
++
++  module_name = info.dli_fname != NULL ? info.dli_fname : "";
++  symbol_name = info.dli_sname != NULL ? info.dli_sname : "";
++  matched = strstr (module_name, "libart.so") != NULL &&
++      (strstr (symbol_name, "ArtMethod") != NULL ||
++       strstr (symbol_name, "PrettyMethod") != NULL) &&
++      strstr (symbol_name, "PrettyMethod") != NULL;
++
++  if (matched)
++  {
++  }
++  else if (strstr (module_name, "libart.so") != NULL ||
++      strstr (symbol_name, "PrettyMethod") != NULL)
++  {
++  }
++
++  return matched;
++}
++
++#endif
++
+ GumInterceptorBackend *
+ _gum_interceptor_backend_create (GRecMutex * mutex,
+                                  GumCodeAllocator * allocator)
+@@ -660,6 +705,7 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
+ 
+   data->scratch_reg = ctx->scratch_register;
+ 
++
+   if (ctx->write_redirect != NULL)
+   {
+     guint scan_bytes;
+@@ -689,9 +735,24 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
+     return TRUE;
+   }
+ 
++#ifdef HAVE_ANDROID
++  if (gum_is_art_pretty_method (function_address) &&
++      gum_arm64_relocator_can_relocate (function_address,
++        GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE, scenario,
++        ctx->relocation_policy, &redirect_limit, &data->scratch_reg))
++  {
++    data->redirect_code_size = GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE;
++
++    ctx->trampoline_slice = gum_code_allocator_alloc_slice (self->allocator);
++  }
++  else if (gum_arm64_relocator_can_relocate (function_address,
++        GUM_INTERCEPTOR_FULL_REDIRECT_SIZE, scenario, ctx->relocation_policy,
++        &redirect_limit, &data->scratch_reg))
++#else
+   if (gum_arm64_relocator_can_relocate (function_address,
+         GUM_INTERCEPTOR_FULL_REDIRECT_SIZE, scenario, ctx->relocation_policy,
+         &redirect_limit, &data->scratch_reg))
++#endif
+   {
+     data->redirect_code_size = GUM_INTERCEPTOR_FULL_REDIRECT_SIZE;
+ 
+@@ -774,6 +835,7 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
+         : ARM64_REG_X16;
+   }
+ 
++
+   return TRUE;
+ 
+ no_scratch_reg:
+@@ -1126,6 +1188,13 @@ _gum_interceptor_backend_activate_trampoline (GumInterceptorBackend * self,
+         gum_arm64_writer_put_ldr_reg_address (aw, data->scratch_reg, on_enter);
+         gum_arm64_writer_put_br_reg (aw, data->scratch_reg);
+         break;
++      case GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE:
++        /* PrettyMethod 特例：先写两条固定指令，再接原 ldr + br 跳转。 */
++        gum_arm64_writer_put_instruction (aw, 0xD2400000);
++        gum_arm64_writer_put_instruction (aw, 0xD2400000);
++        gum_arm64_writer_put_ldr_reg_address (aw, data->scratch_reg, on_enter);
++        gum_arm64_writer_put_br_reg (aw, data->scratch_reg);
++        break;
+       default:
+         g_assert_not_reached ();
+     }
+diff --git a/gum/gumelfmodule.c b/gum/gumelfmodule.c
+index 29f8a572dd75cb4a2fed9271587a5e82a9da5827..0004a2b0d817c0f19a5f9848b08063cab40e52f2 100644
+--- a/gum/gumelfmodule.c
++++ b/gum/gumelfmodule.c
+@@ -20,9 +20,12 @@
+ # include <minizip/mz_zip.h>
+ # include <minizip/mz_zip_rw.h>
+ #endif
++#ifdef HAVE_ANDROID
++#endif
+ 
+ #include <string.h>
+ 
++
+ #define GUM_ELF_DEFAULT_MAPPED_SIZE (64 * 1024)
+ #define GUM_ELF_PAGE_START(value, page_size) \
+     (GUM_ADDRESS (value) & ~GUM_ADDRESS (page_size - 1))
+@@ -480,6 +483,7 @@ gum_elf_module_new_from_file (const gchar * path,
+ {
+   GumElfModule * module;
+ 
++
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "source-path", path,
+       "source-mode", GUM_ELF_SOURCE_MODE_OFFLINE,
+@@ -499,6 +503,7 @@ gum_elf_module_new_from_blob (GBytes * blob,
+ {
+   GumElfModule * module;
+ 
++
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "source-blob", blob,
+       "source-mode", GUM_ELF_SOURCE_MODE_OFFLINE,
+@@ -519,6 +524,7 @@ gum_elf_module_new_from_memory (const gchar * path,
+ {
+   GumElfModule * module;
+ 
++
+   module = g_object_new (GUM_ELF_TYPE_MODULE,
+       "base-address", base_address,
+       "source-path", path,
+@@ -542,6 +548,7 @@ gum_elf_module_load (GumElfModule * self,
+   if (self->file_bytes != NULL)
+     return TRUE;
+ 
++
+   if (self->source_blob != NULL)
+   {
+     self->file_bytes = g_bytes_ref (self->source_blob);
+@@ -559,16 +566,16 @@ gum_elf_module_load (GumElfModule * self,
+ #endif
+     if (!gum_maybe_extract_from_apk (self->source_path, &self->file_bytes))
+     {
+-      GMappedFile * file;
+       gconstpointer data;
+       gsize size;
+       GumMemoryRange r;
++      gchar * contents = NULL;
++      gsize length = 0;
+ 
+-      file = g_mapped_file_new (self->source_path, FALSE, &local_error);
+-      if (file != NULL)
++      if (g_file_get_contents (self->source_path, &contents, &length,
++          &local_error))
+       {
+-        self->file_bytes = g_mapped_file_get_bytes (file);
+-        g_mapped_file_unref (file);
++        self->file_bytes = g_bytes_new_take (contents, length);
+ 
+         data = g_bytes_get_data (self->file_bytes, &size);
+         r.base_address = GUM_ADDRESS (data);
+@@ -581,11 +588,15 @@ gum_elf_module_load (GumElfModule * self,
+         if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+           goto unable_to_open;
+ 
++        g_clear_error (&local_error);
+         self->file_bytes = g_bytes_new_static (
+             GSIZE_TO_POINTER (self->base_address),
+             G_MAXSIZE - self->base_address);
+       }
+     }
++    else
++    {
++    }
+   }
+ 
+   self->file_data = g_bytes_get_data (self->file_bytes, &self->file_size);

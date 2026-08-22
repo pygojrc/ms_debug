@@ -1,46 +1,15 @@
-# ms_debug — MyFrida 化 frida 安卓构建仓库
+# ms_debug
 
-本仓库把 [MyFrida](https://github.com/...) 对官方 frida 的“补丁化构建”能力沉淀为一份可独立构建、可自动发布的源码快照。
+`ms_debug` 是基于官方 Frida 17.15.3 的 Android 构建仓库。当前源码分析、补丁分类和构建入口均以 `ms_from_frida/` 为准。
 
-## 版本
+## 构建
 
-- 基线：官方 **Frida 17.15.3**（注意：官方不存在 `17.5.3` 这个 tag）
-- 补丁：MyFrida 的 7 个改动（gadget 二分/线程名、glib 线程名、`SIGSTOP+PTRACE_SEIZE` 注入保护、gum 运行时与 ART `PrettyMethod` 特例、agent memfd 名称等），见 `patchs/README.md`
+构建统一通过 GitHub Actions 手动执行，默认是 release 构建；release 默认不启用打印日志、二分停止点等调试 patch。构建参数、产物下载和发布规则见 [`ms_from_frida/BUILD-WORKFLOW.md`](ms_from_frida/BUILD-WORKFLOW.md)。
 
-## 目录结构
+本地不再运行构建脚本，也不再修改 SDK 中的预编译 `.a`。GitHub workflow 会始终从固定源码构建 GLib/GObject/GIO，再构建 Android `arm64` 与 `x86_64` 的 `ms_server`、`gadget.so`、`frida-code-inject` 和 `frida-so-inject`。
 
-```
-frida/    官方 17.15.3 源码 + MyFrida 补丁（已合并，去 .git）
-patchs/   对应补丁的 diff 记录（构建不依赖，仅作透明留存）
-.github/  GitHub Actions 构建/发布流程
-```
+## 补丁
 
-> 说明：`frida/` 已经是“源码快照 + 补丁”合并后的整树，因此 `patchs/` 中的 `*.patch` **不需要**再 `git apply`。如需从官方 `17.15.3` 重新生成这些补丁，可基于 MyFrida 仓库 `my_frida/v17.15.3` 的 `base_commit..patch_commit` 两次提交比较。
+当前活动补丁按目的拆分在 [`ms_from_frida/patches/`](ms_from_frida/patches/)：进程名、agent memfd 名、线程名、注入分组停止、Gum 运行时、helper 注入属于 release；打印日志和二分调试点属于 debug。完整应用顺序和 release/debug 约束见 [`ms_from_frida/patches/README.md`](ms_from_frida/patches/README.md)。
 
-## 本地构建（参考 MyFrida）
-
-```bash
-# 需要 Android NDK r29 与 JDK 17
-cd frida
-export ANDROID_NDK_ROOT=/path/to/android-ndk-r29
-./configure --host=android-arm64 --prefix="$PWD/install"
-# 按 MyFrida 方式修补 SDK 内 glib 线程名（可选，对应 patch 002/003）
-python3 scripts/修补_ms线程名.py deps/sdk-android-arm64/lib/libglib-2.0.a deps/sdk-android-arm64/lib/libgio-2.0.a
-make frida-server frida-gadget frida-code-inject frida-so-inject
-```
-
-## CI 构建与发布
-
-推送到 `main` 触发构建验证；打 tag（如 `17.15.3`）并推送后，GitHub Actions 会构建安卓 `arm64` 与 `x86_64`，并把产物发布到 releases：
-
-- `ms_server`（frida-server）
-- `gadget.so`（frida-gadget）
-- `frida-code-inject`
-- `frida-so-inject`
-
-`configure` 会自动从 frida 公共 S3 拉取 prebuilt SDK/toolchain（无需 AWS 密钥）；产物版本号使用 frida 官方版本号（即 git tag）。
-
-## 参考来源
-
-- 构建方式参考 `MyFrida/scripts/run_podman.sh` 与 `MyFrida/my_frida/v17.15.3/scripts/`
-- 官方 CI 参考 `frida/.github/workflows/ci.yml` 的 `sdk-android-64` 任务与 `frida/.cirrus.yml`
+`ms_from_frida/patchs/` 保留为旧版本混合 patch 的历史记录，不是当前 workflow 的输入。仓库内的 `frida/` 仍是既有源码快照，用于对照分析；workflow 会重新 checkout `config/versions.env` 指定的官方 commit。

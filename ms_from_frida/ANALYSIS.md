@@ -2,13 +2,13 @@
 
 ## 必须保留的内容
 
-现有 `ms_debug/patchs/001..007` 覆盖了主要调试逻辑，但从官方 Frida 递归源码重新构建时还必须处理：
+当前活动 patch 已按目的拆分到 `ms_from_frida/patches/release/` 和 `ms_from_frida/patches/debug/`。从官方 Frida 递归源码重新构建时还必须处理：
 
 1. Patch 的目标子仓库路径；
-2. `scripts/修补_ms线程名.py` 等新增构建辅助文件；
-3. Android NDK r29、两个目标的 SDK 预构建依赖和 `deps/sdk-android-arm64/lib/`、`deps/sdk-android-x86_64/lib/`；SDK 依赖由 Frida `releng/deps.py sync sdk <host>` 下载，NDK 由 `download_ndk.sh` 下载；它们都不是 Git submodule；
-4. 默认从源码构建 GLib/GObject/GIO 并覆盖 SDK；仅回退模式临时修改 `libglib-2.0.a`、`libgio-2.0.a`；
-5. `build_android.sh` 的 host/target、Meson build root 和产物复制逻辑；
+2. `files/frida-core/` 中无法用文本 patch 表示的 helper 资源；
+3. Android NDK r29、两个目标的 SDK 预构建依赖和 `deps/sdk-android-arm64/lib/`、`deps/sdk-android-x86_64/lib/`；SDK 依赖由 Frida `releng/deps.py sync sdk <host>` 下载；
+4. 始终从源码构建 GLib/GObject/GIO 并覆盖 SDK；不提供预编译 `.a` 回退；
+5. Workflow CI 脚本的 host/target、Meson build root 和产物复制逻辑；
 6. 子模块 commit 与 `ms_debug` vendored 源码版本的对应关系。
 
 源码依赖和预构建依赖由两条路径获取：GLib 等需要打 patch 的依赖使用固定 commit 的 Git clone；PCRE2、zlib、SELinux、Vala、Ninja 等由官方 `releng/deps.py` 根据 `releng/deps.toml` 解析并下载对应 bundle/toolchain。
@@ -21,14 +21,9 @@
 
 ## `.a` 的处理
 
-默认构建使用 `scripts/build_glib_sdk.sh`：它先保留其它预构建 SDK 依赖，再从固定 GLib 源码应用 `002-glib-gio-thread-name-and-gtask-bisect.patch` 与方案 A 的 `009-glib-descriptive-thread-name.patch` 并编译，最后覆盖 SDK 中的 GLib/GObject/GIO 文件。因此默认路径不再编辑 `.a`，线程名修改直接来自源码编译结果。`010`、`011` 分别接入 Gum Linux worker 和远程 loader。
+Workflow 的 `build-android.sh` 从固定 GLib 源码应用 release 线程名 patch；debug 构建再加入 GLib 二分 patch，最后覆盖 SDK 中的 GLib/GObject/GIO 文件。因此线程名修改直接来自源码编译结果。`frida-gum` 的线程名/runtime 和 `frida-core` 的 loader/helper patch 由源码 patch 独立接入。
 
-`.a` 静态库没有作为源码文件提交；只有 `FRIDA_BUILD_GLIB=0` 回退时，`build_android.sh` 才会对 SDK 中的 `libglib-2.0.a` 和 `libgio-2.0.a` 执行等长线程名替换，退出时反向恢复。回退模式必须保证：
-
-- 使用同一份 SDK 静态库；
-- patch 操作具备 `--reverse`；
-- 即使构建失败也通过 `trap` 恢复依赖；
-- 不把已修改的 `.a` 作为下一次构建的输入。
+`.a` 静态库不作为源码 patch 目标，也没有 `FRIDA_BUILD_GLIB=0` 回退。这样可以保证 release/debug 的 GLib 行为和 patch 选择一致，不会因构建失败留下被修改的预编译库。
 
 ## 编译结果异同判定
 
