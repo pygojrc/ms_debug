@@ -79,9 +79,9 @@ index 77e73e6ebd2c785e97fd54457998baa28325b84b..1cc805d43de5c5c8d628ab65fa2eacc4
    'glist.c',
    'gmain.c',
 +  'ms-thread-name.c',
-  'gmappedfile.c',
-  'gmarkup.c',
-  'gmem.c',
+   'gmappedfile.c',
+   'gmarkup.c',
+   'gmem.c',
 diff --git a/glib/ms-thread-name.h b/glib/ms-thread-name.h
 new file mode 100644
 index 000000000..000000000
