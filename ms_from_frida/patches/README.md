@@ -12,6 +12,8 @@
 | release | injection-group-stop | frida-core | 注入分组的 `SIGSTOP`/`PTRACE_SEIZE` 保护 |
 | release | gum-runtime | frida-gum | ELF/ART `PrettyMethod` 运行时处理和 ARM64 trampoline |
 | release | helper-injection | frida-core | helper 注入源码、Meson 和构建集成 |
+| release | control-port | frida-core | 默认控制监听端口为 `27056` |
+| release | exceptor-handler-only | frida-core | 可选关闭 exceptor 对 `sigaction`/`signal` 的 inline hook（默认关闭，靠环境变量或标记文件开启） |
 | debug | logging | frida-gum | `MYOBS` 运行时日志；仅 debug |
 | debug | bisect | frida-core | Gadget 二分停止点；仅 debug |
 | debug | bisect | glib | GTask 二分停止点；仅 debug |
@@ -26,6 +28,7 @@ frida-core:
   release/injection-group-stop
   release/helper-injection
   release/thread-name
+  release/control-port
   [debug/bisect]
 
 frida-gum:

@@ -92,6 +92,9 @@ apply_patch frida-core release/agent-memfd-name/frida-core.patch
 apply_patch frida-core release/injection-group-stop/frida-core.patch
 apply_patch frida-core release/helper-injection/frida-core.patch
 apply_patch frida-core release/thread-name/frida-core.patch
+apply_patch frida-core release/control-port/frida-core.patch
+# ms_debug: 可选关闭 exceptor 对 sigaction/signal 的 inline hook（加固壳 paciasp 检测）
+apply_patch frida-core release/exceptor-handler-only/frida-core.patch
 apply_patch frida-gum release/process-name/frida-gum.patch
 apply_patch frida-gum release/gum-runtime/frida-gum.patch
 apply_patch frida-gum release/thread-name/frida-gum.patch
