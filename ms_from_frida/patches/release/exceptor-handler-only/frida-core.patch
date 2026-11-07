@@ -1,8 +1,7 @@
-diff --git a/subprojects/frida-core/lib/payload/libc-shim.c b/subprojects/frida-core/lib/payload/libc-shim.c
-index 862737f..de5b6c2 100644
---- a/subprojects/frida-core/lib/payload/libc-shim.c
-+++ b/subprojects/frida-core/lib/payload/libc-shim.c
-@@ -293,6 +293,23 @@ frida_libc_shim_init (void)
+diff --git a/lib/payload/libc-shim.c b/lib/payload/libc-shim.c
+--- a/lib/payload/libc-shim.c
++++ b/lib/payload/libc-shim.c
+@@ -293,6 +293,23 @@
    if (frida_libc_shim_initialized)
      return;
  
