@@ -64,7 +64,9 @@ try {
   & cmd /c "configure.bat --host=windows-x86_64 --prefix=$installPrefix --enable-server --enable-gadget --enable-inject --disable-frida-tools --disable-frida-python -- -Dlibdir=lib -Dfrida-core:compat=disabled -Dfrida-core:compiler_backend=disabled -Dfrida-core:barebone_backend=disabled"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  & cmd /c "make.bat frida-server frida-gadget frida-code-inject frida-so-inject"
+  # Windows 上 meson 的 custom_target 名与 make 目标名不完全一致，直接构建全部启用目标；
+  # 未启用的 portal/tools/python 不会进入构建，产物在下方按明确路径复制。
+  & cmd /c "make.bat"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
   Pop-Location
