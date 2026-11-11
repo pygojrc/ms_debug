@@ -48,6 +48,10 @@ if (-not (Test-Path $glibArchive)) { Write-Error "自构建 GLib SDK 未生成�
 tar -xJf $glibArchive -C (Join-Path $SourceDir "deps\sdk-windows-x86_64-mt")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# deps.py 用 FRIDA_DEPS 决定依赖缓存目录；自建 glib 完成后必须清除，
+# 否则主 configure 会从临时目录找 SDK（缺 ngtcp2 等依赖）而失败。
+Remove-Item Env:FRIDA_DEPS -ErrorAction SilentlyContinue
+
 # native 构建的 server/gadget/inject auto 规则默认关闭，必须显式 enable。
 # compat 需要 32 位 SDK 与工具链，先关闭以打通 64 位产物。
 $buildDir = Join-Path $SourceDir "build\windows-x86_64"

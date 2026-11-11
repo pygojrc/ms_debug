@@ -134,7 +134,7 @@ index 0000000..2d22d65
 +
 +#include "gthread.h"
 +
-+#if defined(G_OS_LINUX)
++#if defined(__linux__)
 +# include <sys/prctl.h>
 +#elif defined(G_OS_WIN32)
 +# include <windows.h>
@@ -143,7 +143,7 @@ index 0000000..2d22d65
 +static void
 +ms_process_name_set_os_name (const gchar *name)
 +{
-+#if defined(G_OS_LINUX)
++#if defined(__linux__)
 +  /* 主线程 comm 是 /proc/<pid>/comm 与 ps/top 最常被读取的进程名。 */
 +  (void) prctl (PR_SET_NAME, name, 0, 0, 0);
 +#elif defined(G_OS_WIN32)
@@ -236,7 +236,7 @@ index 0000000..1234534
 +# include <pthread.h>
 +#endif
 +
-+#if defined(G_OS_LINUX)
++#if defined(__linux__)
 +# include <sys/prctl.h>
 +# include <sys/syscall.h>
 +# include <unistd.h>
@@ -308,7 +308,7 @@ index 0000000..1234534
 +static guint64
 +ms_thread_name_get_current_tid (void)
 +{
-+#if defined(G_OS_LINUX)
++#if defined(__linux__)
 +  return (guint64) syscall (SYS_gettid);
 +#elif defined(G_OS_WIN32)
 +  return (guint64) GetCurrentThreadId ();
@@ -382,7 +382,7 @@ index 0000000..1234534
 +  (void) pthread_setname_np (pthread_self (), "%s", (gchar *) name);
 +#elif defined(HAVE_PTHREAD_SET_NAME_NP)
 +  (void) pthread_set_name_np (pthread_self (), name);
-+#elif defined(G_OS_LINUX)
++#elif defined(__linux__)
 +  (void) prctl (PR_SET_NAME, name, 0, 0, 0);
 +#elif defined(G_OS_WIN32)
 +  ms_thread_name_set_os_name_win32 (name);
