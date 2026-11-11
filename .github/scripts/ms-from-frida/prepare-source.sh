@@ -9,25 +9,40 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "${ROOT_DIR}/ms_from_frida/config/versions.env"
+PYTHON="${PYTHON:-python3}"
 
 BUILD_TYPE="release"
+HOST=""
 ARCH=""
 SOURCE_DIR=""
-usage() { echo "用法：$0 [-b release|debug] -a arm64|x86_64 -s <source-dir>" >&2; }
+usage() {
+  echo "用法：$0 [-b release|debug] --host <host> -s <source-dir>" >&2
+  echo "host: android-arm64 android-x86_64 linux-x86_64 windows-x86_64" >&2
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -b|--build-type) BUILD_TYPE="${2:?缺少 build type}"; shift 2 ;;
-    -a|--arch) ARCH="${2:?缺少 arch}"; shift 2 ;;
+    --host) HOST="${2:?缺少 host}"; shift 2 ;;
+    -a|--arch) ARCH="${2:?缺少 arch}"; shift 2 ;;   # 兼容旧参数，等价 android-<arch>
     -s|--source) SOURCE_DIR="${2:?缺少 source dir}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
 done
+
+# 未显式给 --host 时，允许用旧的 --arch 推导 android host。
+if [[ -z "${HOST}" ]]; then
+  [[ -n "${ARCH}" ]] || { usage; exit 2; }
+  HOST="android-${ARCH}"
+fi
+case "${HOST}" in
+  android-arm64|android-x86_64|linux-x86_64|windows-x86_64) ;;
+  *) echo "不支持的 host：${HOST}" >&2; usage; exit 2 ;;
+esac
+PLATFORM="${HOST%%-*}"     # android | linux | windows
 [[ "${BUILD_TYPE}" == release || "${BUILD_TYPE}" == debug ]] || { usage; exit 2; }
-[[ "${ARCH}" == arm64 || "${ARCH}" == x86_64 ]] || { usage; exit 2; }
 [[ -n "${SOURCE_DIR}" ]] || { usage; exit 2; }
 SOURCE_DIR="$(realpath -m "${SOURCE_DIR}")"
-HOST="android-${ARCH}"
 
 clone_at() {
   local url="$1" dir="$2" rev="$3"
@@ -74,10 +89,24 @@ link_dep frida-gum libffi
 
 download_prebuilt() {
   local bundle="$1" machine="$2" location="$3"
-  python3 "${SOURCE_DIR}/releng/deps.py" sync "${bundle}" "${machine}" "${location}"
+  "${PYTHON}" "${SOURCE_DIR}/releng/deps.py" sync "${bundle}" "${machine}" "${location}"
 }
-download_prebuilt sdk "${HOST}" "${SOURCE_DIR}/deps/sdk-${HOST}"
-download_prebuilt toolchain linux-x86_64 "${SOURCE_DIR}/deps/toolchain-linux-x86_64"
+
+# 按 host 同步预编译依赖；windows 的 SDK 带 vscrt config 后缀，工具链固定映射到 windows-x86。
+case "${PLATFORM}" in
+  android)
+    download_prebuilt sdk "${HOST}" "${SOURCE_DIR}/deps/sdk-${HOST}"
+    download_prebuilt toolchain linux-x86_64 "${SOURCE_DIR}/deps/toolchain-linux-x86_64"
+    ;;
+  linux)
+    download_prebuilt sdk "${HOST}" "${SOURCE_DIR}/deps/sdk-${HOST}"
+    download_prebuilt toolchain linux-x86_64 "${SOURCE_DIR}/deps/toolchain-linux-x86_64"
+    ;;
+  windows)
+    download_prebuilt sdk "${HOST}-mt" "${SOURCE_DIR}/deps/sdk-${HOST}-mt"
+    download_prebuilt toolchain "${HOST}" "${SOURCE_DIR}/deps/toolchain-${HOST}"
+    ;;
+esac
 
 apply_patch() {
   local repo="$1" patch="$2"
@@ -87,27 +116,51 @@ apply_patch() {
     --whitespace=nowarn "${ROOT_DIR}/ms_from_frida/patches/${patch}"
 }
 
-# 顺序体现 patch 的依赖关系；debug patch 永远排在对应 release patch 之后。
-apply_patch frida-core release/agent-memfd-name/frida-core.patch
-apply_patch frida-core release/injection-group-stop/frida-core.patch
-apply_patch frida-core release/helper-injection/frida-core.patch
-apply_patch frida-core release/thread-name/frida-core.patch
-apply_patch frida-core release/control-port/frida-core.patch
-# ms_debug: 可选关闭 exceptor 对 sigaction/signal 的 inline hook（加固壳 paciasp 检测）
-apply_patch frida-core release/exceptor-handler-only/frida-core.patch
-apply_patch frida-gum release/process-name/frida-gum.patch
-apply_patch frida-gum release/gum-runtime/frida-gum.patch
-apply_patch frida-gum release/thread-name/frida-gum.patch
-apply_patch glib release/thread-name/glib.patch
-if [[ "${BUILD_TYPE}" == debug ]]; then
+# 所有平台共用：名字统一改造、控制端口、gum runtime；debug 补丁跟随 profile。
+apply_common() {
+  apply_patch frida-core release/process-name/frida-core.patch
+  apply_patch frida-core release/control-port/frida-core.patch
+  apply_patch frida-gum release/gum-runtime/frida-gum.patch
+  apply_patch glib release/thread-name/glib.patch
+  apply_patch frida-gum release/thread-name/frida-gum.patch
+  apply_patch frida-core release/thread-name/frida-core.patch
+  apply_patch frida-core release/exceptor-handler-only/frida-core.patch
+}
+
+# 仅 linux 内核语义可用的补丁：memfd 命名、注入分组停止、自研 helper 注入。
+apply_linux_family() {
+  apply_patch frida-core release/agent-memfd-name/frida-core.patch
+  apply_patch frida-core release/injection-group-stop/frida-core.patch
+  apply_patch frida-core release/helper-injection/frida-core.patch
+}
+
+# 仅 windows 需要的标识改名与注入修复。
+apply_windows_family() {
+  apply_patch frida-core release/windows-identity/frida-core.patch
+}
+
+apply_debug() {
   apply_patch frida-core debug/bisect/frida-core.patch
   apply_patch frida-gum debug/logging/frida-gum.patch
   apply_patch glib debug/bisect/glib.patch
+}
+
+apply_common
+if [[ "${PLATFORM}" == android || "${PLATFORM}" == linux ]]; then
+  apply_linux_family
+fi
+if [[ "${PLATFORM}" == windows ]]; then
+  apply_windows_family
+fi
+if [[ "${BUILD_TYPE}" == debug ]]; then
+  apply_debug
 fi
 
-# helper.dex 是已审计的架构无关资源，随源码一起进入 Frida 的资源打包。
-cp -a "${ROOT_DIR}/ms_from_frida/files/frida-core/." \
-  "${SOURCE_DIR}/subprojects/frida-core/"
+# helper.dex 与 ARM64 helper payload 只服务于 android 目标。
+if [[ "${PLATFORM}" == android ]]; then
+  cp -a "${ROOT_DIR}/ms_from_frida/files/frida-core/." \
+    "${SOURCE_DIR}/subprojects/frida-core/"
+fi
 
 printf '源码准备完成：build_type=%s host=%s source=%s\n' \
   "${BUILD_TYPE}" "${HOST}" "${SOURCE_DIR}"

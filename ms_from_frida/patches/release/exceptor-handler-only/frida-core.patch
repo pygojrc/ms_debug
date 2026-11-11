@@ -1,10 +1,12 @@
 diff --git a/lib/payload/libc-shim.c b/lib/payload/libc-shim.c
+index 862737f..8141667 100644
 --- a/lib/payload/libc-shim.c
 +++ b/lib/payload/libc-shim.c
-@@ -293,6 +293,23 @@
+@@ -293,6 +293,25 @@ frida_libc_shim_init (void)
    if (frida_libc_shim_initialized)
      return;
  
++#if defined (HAVE_ANDROID)
 +  /* ms_debug: 可选关闭 exceptor 对 signal/sigaction 的 inline hook。
 +     默认保持上游 FULL 行为不变。开启方式（任一命中即开启）：
 +       1. 环境变量 MS_EXCEPTOR_HANDLER_ONLY 存在
@@ -21,6 +23,7 @@ diff --git a/lib/payload/libc-shim.c b/lib/payload/libc-shim.c
 +  if (getenv ("MS_EXCEPTOR_HANDLER_ONLY") != NULL ||
 +      access ("/data/local/tmp/msexceptor.handler_only", F_OK) == 0)
 +    gum_exceptor_set_mode (GUM_EXCEPTOR_MODE_HANDLER_ONLY);
++#endif
 +
    gum_init_embedded ();
  

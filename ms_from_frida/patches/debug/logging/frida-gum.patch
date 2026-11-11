@@ -1,31 +1,28 @@
 diff --git a/bindings/gumjs/gumscriptscheduler.c b/bindings/gumjs/gumscriptscheduler.c
-index b86a6c570cba687a92174b42fc99c44b5b47a901..b42e2612504186e6bdff8e76ccaad52a066719e0 100644
+index b86a6c57..7de5f5f4 100644
 --- a/bindings/gumjs/gumscriptscheduler.c
 +++ b/bindings/gumjs/gumscriptscheduler.c
-@@ -6,6 +6,14 @@
+@@ -6,6 +6,10 @@
  
  #include "gumscriptscheduler.h"
  
-+#ifdef HAVE_ANDROID
-+# include <android/log.h>
-+# define MY_OBS_LOG(...) \
-+    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
-+#else
-+# define MY_OBS_LOG(...)
-+#endif
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
 +
  struct _GumScriptScheduler
  {
    GObject parent;
-@@ -114,6 +122,7 @@ gum_script_scheduler_start (GumScriptScheduler * self)
+@@ -114,6 +118,8 @@ gum_script_scheduler_start (GumScriptScheduler * self)
    {
      self->js_loop = g_main_loop_new (self->js_context, TRUE);
  
 +    MY_OBS_LOG ("script scheduler start thread_name=gum-js-loop");
++
      self->js_thread = g_thread_new ("gum-js-loop",
          (GThreadFunc) gum_script_scheduler_run_js_loop, self);
    }
-@@ -124,6 +133,7 @@ gum_script_scheduler_stop (GumScriptScheduler * self)
+@@ -124,6 +130,7 @@ gum_script_scheduler_stop (GumScriptScheduler * self)
  {
    if (self->js_thread != NULL)
    {
@@ -34,25 +31,21 @@ index b86a6c570cba687a92174b42fc99c44b5b47a901..b42e2612504186e6bdff8e76ccaad52a
          (GumScriptJobFunc) g_main_loop_quit, self->js_loop, NULL);
      g_thread_join (self->js_thread);
 diff --git a/gum/backend-arm64/guminterceptor-arm64.c b/gum/backend-arm64/guminterceptor-arm64.c
-index 1b8cf588b019d07b21277c6818992bfe467daa19..d41b591c16d960c3045077e646dc4937d2bf19d2 100644
+index 1b8cf588..b0d6a21d 100644
 --- a/gum/backend-arm64/guminterceptor-arm64.c
 +++ b/gum/backend-arm64/guminterceptor-arm64.c
-@@ -30,6 +30,14 @@
+@@ -30,6 +30,10 @@
  #endif
  
  
-+#ifdef HAVE_ANDROID
-+# include <android/log.h>
-+# define MY_OBS_LOG(...) \
-+    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
-+#else
-+# define MY_OBS_LOG(...)
-+#endif
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
 +
  #define GUM_INTERCEPTOR_FULL_REDIRECT_SIZE 16
  #define GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE 24
  
-@@ -703,6 +711,8 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
+@@ -703,6 +707,8 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
  
    *need_deflector = FALSE;
  
@@ -61,7 +54,7 @@ index 1b8cf588b019d07b21277c6818992bfe467daa19..d41b591c16d960c3045077e646dc4937
    data->scratch_reg = ctx->scratch_register;
  
  
-@@ -1175,6 +1185,8 @@ _gum_interceptor_backend_activate_trampoline (GumInterceptorBackend * self,
+@@ -1175,6 +1181,8 @@ _gum_interceptor_backend_activate_trampoline (GumInterceptorBackend * self,
    }
    else
    {
@@ -71,54 +64,46 @@ index 1b8cf588b019d07b21277c6818992bfe467daa19..d41b591c16d960c3045077e646dc4937
      {
        case 4:
 diff --git a/gum/gum.c b/gum/gum.c
-index f1dbdb68fc622593b26db121bc5780d3626642dc..269415ccea6684b77a0b70f807c2e20fdd1c2068 100644
+index 58e83a94..fdfae1ea 100644
 --- a/gum/gum.c
 +++ b/gum/gum.c
-@@ -8,6 +8,10 @@
+@@ -8,6 +8,11 @@
  
  #include "gum.h"
  
-+#ifdef HAVE_ANDROID
-+# include <android/log.h>
-+#endif
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
++
 +
  #include "gum-init.h"
  #include "gumexceptorbackend.h"
  #include "guminterceptor-priv.h"
-@@ -302,6 +306,10 @@ gum_init_embedded (void)
+@@ -302,6 +307,8 @@ gum_init_embedded (void)
    g_log_set_default_handler (gum_on_log_message, NULL);
    gum_do_init ();
  
-+#ifdef HAVE_ANDROID
-+  __android_log_print (ANDROID_LOG_INFO, "MYOBS",
-+      "gum init set_prgname=gogogo");
-+#endif
-   g_set_prgname ("gogogo");
++  MY_OBS_LOG ("gum init");
++
+   g_set_prgname ("frida");
  
  #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
 diff --git a/gum/gumelfmodule.c b/gum/gumelfmodule.c
-index 0004a2b0d817c0f19a5f9848b08063cab40e52f2..6ded900bb67f2c2305ea12d8e087ad83450e62eb 100644
+index 0004a2b0..4434ba65 100644
 --- a/gum/gumelfmodule.c
 +++ b/gum/gumelfmodule.c
-@@ -25,6 +25,17 @@
+@@ -25,6 +25,10 @@
  
  #include <string.h>
  
-+#ifdef HAVE_ANDROID
-+# include <android/log.h>
-+#endif
-+
-+#ifdef HAVE_ANDROID
-+# define MY_OBS_LOG(...) \
-+    __android_log_print (ANDROID_LOG_INFO, "MYOBS", __VA_ARGS__)
-+#else
-+# define MY_OBS_LOG(...)
-+#endif
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
 +
  
  #define GUM_ELF_DEFAULT_MAPPED_SIZE (64 * 1024)
  #define GUM_ELF_PAGE_START(value, page_size) \
-@@ -543,6 +554,8 @@ gboolean
+@@ -543,6 +547,8 @@ gboolean
  gum_elf_module_load (GumElfModule * self,
                       GError ** error)
  {

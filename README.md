@@ -1,12 +1,16 @@
 # ms_debug
 
-`ms_debug` 是基于官方 Frida 17.15.3 的 Android 构建仓库。当前源码分析、补丁分类和构建入口均以 `ms_from_frida/` 为准。
+`ms_debug` 是基于官方 Frida 17.15.3 的构建仓库。当前源码分析、补丁分类和构建入口均以 `ms_from_frida/` 为准。
 
 ## 构建
 
 构建统一通过 GitHub Actions 手动执行，默认是 release 构建；release 默认不启用打印日志、二分停止点等调试 patch。构建参数、产物下载和发布规则见 [`ms_from_frida/BUILD-WORKFLOW.md`](ms_from_frida/BUILD-WORKFLOW.md)。
 
-本地不再运行构建脚本，也不再修改 SDK 中的预编译 `.a`。GitHub workflow 会始终从固定源码构建 GLib/GObject/GIO，再构建 Android `arm64` 与 `x86_64` 的 `ms_server`、`gadget.so`、`frida-code-inject` 和 `frida-so-inject`。
+本地不再运行构建脚本，也不再修改 SDK 中的预编译 `.a`。GitHub workflow 会始终从固定源码构建 GLib/GObject/GIO，再构建以下目标的 `ms_server`、`gadget`、`frida-code-inject` 和 `frida-so-inject`：
+
+- Android `arm64` 与 `x86_64`（NDK 交叉）
+- Linux `x86_64`（容器本机构建）
+- Windows `x86_64`（MSVC 原生构建）
 
 ## 补丁
 

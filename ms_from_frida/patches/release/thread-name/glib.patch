@@ -1,5 +1,5 @@
 diff --git a/glib/gthread-posix.c b/glib/gthread-posix.c
-index db1d06976eb1d3dc157d827864406e0fe0ac97a8..a157c0aa15ce4d46f65826e925c7f140dfdc84eb 100644
+index db1d069..a157c0a 100644
 --- a/glib/gthread-posix.c
 +++ b/glib/gthread-posix.c
 @@ -51,6 +51,7 @@
@@ -27,8 +27,35 @@ index db1d06976eb1d3dc157d827864406e0fe0ac97a8..a157c0aa15ce4d46f65826e925c7f140
  }
  
  /* {{{1 GMutex and GCond futex implementation */
+diff --git a/glib/gthread-win32.c b/glib/gthread-win32.c
+index c11294b..15a1d3d 100644
+--- a/glib/gthread-win32.c
++++ b/glib/gthread-win32.c
+@@ -48,6 +48,7 @@
+ #include "gthread.h"
+ #include "gthreadprivate.h"
+ #include "gslice.h"
++#include "ms-thread-name.h"
+ 
+ #include <windows.h>
+ 
+@@ -721,11 +722,9 @@ g_thread_win32_set_thread_desc (const gchar *name)
+ void
+ g_system_thread_set_name (const gchar *name)
+ {
+-  /* Prefer SetThreadDescription over exception based way if available,
+-   * since thread description set by SetThreadDescription will be preserved
+-   * in dump file */
+-  if (!g_thread_win32_set_thread_desc (name))
+-    SetThreadName ((DWORD) -1, name);
++  /* ms_debug: 统一由 glib 层设置线程名（Win10+ 走 SetThreadDescription），
++   * 与 POSIX 后端保持同一套命名语义。 */
++  ms_thread_name_set_current (name);
+ }
+ 
+ /* {{{1 SRWLock and CONDITION_VARIABLE emulation (for Windows XP) */
 diff --git a/glib/gthread.c b/glib/gthread.c
-index 373f24e45403ea69be48125e5c56953ee5421371..70e944e302873b7c8bf045f6b300b104d59f9f20 100644
+index 373f24e..70e944e 100644
 --- a/glib/gthread.c
 +++ b/glib/gthread.c
 @@ -42,6 +42,7 @@
@@ -63,61 +90,129 @@ index 373f24e45403ea69be48125e5c56953ee5421371..70e944e302873b7c8bf045f6b300b104
  }
  
 diff --git a/glib/meson.build b/glib/meson.build
-index 77e73e6ebd2c785e97fd54457998baa28325b84b..1cc805d43de5c5c8d628ab65fa2eacc44663929d 100644
+index 77e73e6..2926abc 100644
 --- a/glib/meson.build
 +++ b/glib/meson.build
-@@ -199,6 +199,7 @@ glib_sub_headers = files(
+@@ -199,6 +199,8 @@ glib_sub_headers = files(
    'glist.h',
    'gmacros.h',
    'gmain.h',
 +  'ms-thread-name.h',
++  'ms-process-name.h',
    'gmappedfile.h',
    'gmarkup.h',
    'gmem.h',
-@@ -290,6 +291,7 @@ glib_sources += files(
+@@ -290,6 +292,8 @@ glib_sources += files(
    'glib-private.c',
    'glist.c',
    'gmain.c',
 +  'ms-thread-name.c',
++  'ms-process-name.c',
    'gmappedfile.c',
    'gmarkup.c',
    'gmem.c',
-diff --git a/glib/ms-thread-name.h b/glib/ms-thread-name.h
+diff --git a/glib/ms-process-name.c b/glib/ms-process-name.c
 new file mode 100644
-index 000000000..000000000
+index 0000000..2d22d65
 --- /dev/null
-+++ b/glib/ms-thread-name.h
-@@ -0,0 +1,24 @@
-+/* GLIB - GLib thread naming integration for ms_debug
++++ b/glib/ms-process-name.c
+@@ -0,0 +1,65 @@
++/* GLIB - GLib process naming integration for ms_debug
 + *
-+ * This header is intentionally small.  It is used by Frida/Gum to share the
-+ * same logical thread-name registry as GLib-created threads.
++ * g_set_prgname() only updates a process-local string, which is not visible
++ * to OS-level observers.  This module sets the kernel-visible name:
++ *   - Linux/Android: prctl(PR_SET_NAME) changes the calling thread's comm,
++ *     i.e. the name shown by ps/top when invoked on the main thread.
++ *   - Windows: SetThreadDescription() sets the main thread description
++ *     (Win10+); the process image name still comes from the executable name.
++ * Other platforms are a no-op.
 + */
 +
-+#ifndef __MS_THREAD_NAME_H__
-+#define __MS_THREAD_NAME_H__
++#include "config.h"
 +
-+#include <glib/gtypes.h>
++#include "ms-process-name.h"
++
++#include "gthread.h"
++
++#if defined(G_OS_LINUX)
++# include <sys/prctl.h>
++#elif defined(G_OS_WIN32)
++# include <windows.h>
++#endif
++
++static void
++ms_process_name_set_os_name (const gchar *name)
++{
++#if defined(G_OS_LINUX)
++  /* 主线程 comm 是 /proc/<pid>/comm 与 ps/top 最常被读取的进程名。 */
++  (void) prctl (PR_SET_NAME, name, 0, 0, 0);
++#elif defined(G_OS_WIN32)
++  typedef HRESULT (WINAPI * MsSetThreadDescriptionFunc) (HANDLE thread,
++                                                         PCWSTR description);
++  static MsSetThreadDescriptionFunc set_thread_description;
++  static gsize initialized = 0;
++  WCHAR wide[64];
++
++  /* 动态解析 Win10 才有的 SetThreadDescription；旧系统保持 no-op。 */
++  if (g_once_init_enter (&initialized))
++  {
++    HMODULE kernel32 = GetModuleHandleW (L"kernel32.dll");
++    if (kernel32 != NULL)
++      set_thread_description = (MsSetThreadDescriptionFunc)
++          GetProcAddress (kernel32, "SetThreadDescription");
++    g_once_init_leave (&initialized, 1);
++  }
++
++  if (set_thread_description == NULL)
++    return;
++
++  if (MultiByteToWideChar (CP_UTF8, 0, name, -1, wide,
++        G_N_ELEMENTS (wide)) > 0)
++    (void) set_thread_description (GetCurrentThread (), wide);
++#else
++  (void) name;
++#endif
++}
++
++void
++ms_process_name_set_current (const gchar *name)
++{
++  if (name == NULL || name[0] == '\0')
++    return;
++
++  ms_process_name_set_os_name (name);
++}
+diff --git a/glib/ms-process-name.h b/glib/ms-process-name.h
+new file mode 100644
+index 0000000..be0480c
+--- /dev/null
++++ b/glib/ms-process-name.h
+@@ -0,0 +1,19 @@
++/* GLIB - GLib process naming integration for ms_debug
++ *
++ * Sets the OS-visible process/thread name.  GLib's own g_prgname is only a
++ * process-local string, so platforms that expose a separate kernel-visible
++ * name need an explicit backend; this module is that backend.
++ */
++
++#ifndef __MS_PROCESS_NAME_H__
++#define __MS_PROCESS_NAME_H__
++
++#include <glib.h>
 +
 +G_BEGIN_DECLS
 +
-+void     ms_thread_name_set_current             (const gchar *source_name);
-+void     ms_thread_name_set_current_for_index   (guint        index,
-+                                                  const gchar *source_name);
-+void     ms_thread_name_unregister_current      (void);
-+gboolean ms_thread_name_lookup                   (guint64      tid,
-+                                                  gchar       *buffer,
-+                                                  gsize         buffer_size);
++void ms_process_name_set_current (const gchar *name);
 +
 +G_END_DECLS
 +
-+#endif /* __MS_THREAD_NAME_H__ */
++#endif /* __MS_PROCESS_NAME_H__ */
 diff --git a/glib/ms-thread-name.c b/glib/ms-thread-name.c
 new file mode 100644
-index 000000000..000000000
+index 0000000..1234534
 --- /dev/null
 +++ b/glib/ms-thread-name.c
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,251 @@
 +/* GLIB - GLib thread naming integration for ms_debug
 + *
 + * This is the descriptive naming strategy.  The complete logical name is
@@ -133,6 +228,7 @@ index 000000000..000000000
 +#include "gmem.h"
 +#include "gstrfuncs.h"
 +#include "gthread.h"
++#include "gunicode.h"
 +
 +#include <string.h>
 +
@@ -144,6 +240,10 @@ index 000000000..000000000
 +# include <sys/prctl.h>
 +# include <sys/syscall.h>
 +# include <unistd.h>
++#endif
++
++#if defined(G_OS_WIN32)
++# include <windows.h>
 +#endif
 +
 +typedef struct _MsThreadNameRecord MsThreadNameRecord;
@@ -210,6 +310,8 @@ index 000000000..000000000
 +{
 +#if defined(G_OS_LINUX)
 +  return (guint64) syscall (SYS_gettid);
++#elif defined(G_OS_WIN32)
++  return (guint64) GetCurrentThreadId ();
 +#elif defined(G_OS_UNIX)
 +  return (guint64) (guintptr) pthread_self ();
 +#else
@@ -233,6 +335,42 @@ index 000000000..000000000
 +  (void) source_name;
 +}
 +
++#if defined(G_OS_WIN32)
++
++typedef HRESULT (WINAPI * MsSetThreadDescriptionFunc) (HANDLE thread,
++                                                       PCWSTR description);
++
++/* 动态解析 Win10 才有的 SetThreadDescription；Win7/8 上保持 no-op。 */
++static void
++ms_thread_name_set_os_name_win32 (const gchar *name)
++{
++  static MsSetThreadDescriptionFunc set_thread_description;
++  static gsize initialized = 0;
++  gunichar2 *name16;
++
++  if (g_once_init_enter (&initialized))
++  {
++    HMODULE kernel32 = GetModuleHandleW (L"kernel32.dll");
++    if (kernel32 != NULL)
++      set_thread_description = (MsSetThreadDescriptionFunc)
++          GetProcAddress (kernel32, "SetThreadDescription");
++    g_once_init_leave (&initialized, 1);
++  }
++
++  if (set_thread_description == NULL)
++    return;
++
++  name16 = g_utf8_to_utf16 (name, -1, NULL, NULL, NULL);
++  if (name16 == NULL)
++    return;
++
++  (void) set_thread_description (GetCurrentThread (), (const WCHAR *) name16);
++
++  g_free (name16);
++}
++
++#endif /* G_OS_WIN32 */
++
 +static void
 +ms_thread_name_set_os_name (const gchar *name)
 +{
@@ -246,6 +384,8 @@ index 000000000..000000000
 +  (void) pthread_set_name_np (pthread_self (), name);
 +#elif defined(G_OS_LINUX)
 +  (void) prctl (PR_SET_NAME, name, 0, 0, 0);
++#elif defined(G_OS_WIN32)
++  ms_thread_name_set_os_name_win32 (name);
 +#else
 +  (void) name;
 +#endif
@@ -324,3 +464,33 @@ index 000000000..000000000
 +
 +  return found;
 +}
+diff --git a/glib/ms-thread-name.h b/glib/ms-thread-name.h
+new file mode 100644
+index 0000000..08e7594
+--- /dev/null
++++ b/glib/ms-thread-name.h
+@@ -0,0 +1,24 @@
++/* GLIB - GLib thread naming integration for ms_debug
++ *
++ * This header is intentionally small.  It is used by Frida/Gum to share the
++ * same logical thread-name registry as GLib-created threads.
++ */
++
++#ifndef __MS_THREAD_NAME_H__
++#define __MS_THREAD_NAME_H__
++
++#include <glib/gtypes.h>
++
++G_BEGIN_DECLS
++
++void     ms_thread_name_set_current             (const gchar *source_name);
++void     ms_thread_name_set_current_for_index   (guint        index,
++                                                  const gchar *source_name);
++void     ms_thread_name_unregister_current      (void);
++gboolean ms_thread_name_lookup                   (guint64      tid,
++                                                  gchar       *buffer,
++                                                  gsize         buffer_size);
++
++G_END_DECLS
++
++#endif /* __MS_THREAD_NAME_H__ */
