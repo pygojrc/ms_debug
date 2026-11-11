@@ -8,9 +8,9 @@
 
 本地不再运行构建脚本，也不再修改 SDK 中的预编译 `.a`。GitHub workflow 会始终从固定源码构建 GLib/GObject/GIO，再构建以下目标的 `ms_server`、`gadget`、`frida-code-inject` 和 `frida-so-inject`：
 
-- Android `arm64` 与 `x86_64`（NDK 交叉）
-- Linux `x86_64`（容器本机构建）
-- Windows `x86_64`（MSVC 原生构建）
+- Android `arm64` 与 `x86_64`（NDK 交叉）：`ms_server`、`gadget.so`、`frida-code-inject`、`frida-so-inject`
+- Linux `x86_64`（容器本机构建）：同上
+- Windows `x86_64`（MSVC 原生构建）：`ms_server.exe`、`gadget.dll`、`frida-inject.exe`
 
 ## 补丁
 

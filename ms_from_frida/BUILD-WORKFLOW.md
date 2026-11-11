@@ -13,9 +13,11 @@
 | --- | --- | --- |
 | `android-arm64` / `android-x86_64` | `ubuntu-24.04` + x-tools 容器 + Android NDK r29 交叉 | `ms_server`、`gadget.so`、`frida-code-inject`、`frida-so-inject` |
 | `linux-x86_64` | `ubuntu-24.04` + x-tools 容器本机构建 | 同上（ELF） |
-| `windows-x86_64` | `windows-latest` + Visual Studio（MSVC）原生构建 | `ms_server.exe`、`gadget.dll`、`frida-code-inject.exe`、`frida-so-inject.exe` |
+| `windows-x86_64` | `windows-latest` + Visual Studio（MSVC）原生构建 | `ms_server.exe`、`gadget.dll`、`frida-inject.exe` |
 
 linux/windows 的 native 构建必须显式 `--enable-server --enable-gadget --enable-inject`（根 meson 的 auto 规则在 native 构建下会关闭它们）；android 交叉构建同样显式传入以保持一致。
+
+Windows 不应用 linux-family 的 `helper-injection` 补丁（自研 `frida-code-inject`/`frida-so-inject` 依赖 Linux helper 后端），因此 Windows 目标产出官方标准三件套：`ms_server.exe`、`gadget.dll`、`frida-inject.exe`。
 
 ## 平台补丁选择
 
