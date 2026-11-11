@@ -11,7 +11,7 @@ if ($env:GITHUB_ACTIONS -ne "true") {
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $OutDir = Join-Path $RepoRoot "out\$BuildType\windows-x86_64"
-$outputs = @("ms_server.exe", "gadget.dll", "frida-code-inject.exe", "frida-so-inject.exe")
+$outputs = @("ms_server.exe", "gadget.dll", "frida-inject.exe")
 
 # 以 Latin1 读原始字节做 ASCII 字符串匹配，避免外部 strings 工具依赖。
 function Get-BinaryText([string]$Path) {

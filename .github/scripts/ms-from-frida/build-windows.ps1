@@ -74,8 +74,9 @@ try {
 
 $outDir = Join-Path $RepoRoot "out\$BuildType\windows-x86_64"
 New-Item -ItemType Directory -Force $outDir | Out-Null
+# Windows 不应用 linux-family 的 helper-injection 补丁，因此只产出官方注入工具 frida-inject；
+# 自研 frida-code-inject / frida-so-inject 依赖 Linux helper 后端，暂不在 Windows 提供。
 Copy-Item (Join-Path $buildDir "subprojects\frida-core\server\frida-server.exe") (Join-Path $outDir "ms_server.exe")
 Copy-Item (Join-Path $buildDir "subprojects\frida-core\lib\gadget\frida-gadget.dll") (Join-Path $outDir "gadget.dll")
-Copy-Item (Join-Path $buildDir "subprojects\frida-core\inject\frida-code-inject.exe") (Join-Path $outDir "frida-code-inject.exe")
-Copy-Item (Join-Path $buildDir "subprojects\frida-core\inject\frida-so-inject.exe") (Join-Path $outDir "frida-so-inject.exe")
+Copy-Item (Join-Path $buildDir "subprojects\frida-core\inject\frida-inject.exe") (Join-Path $outDir "frida-inject.exe")
 Write-Host "windows-x86_64 构建完成：$outDir"
