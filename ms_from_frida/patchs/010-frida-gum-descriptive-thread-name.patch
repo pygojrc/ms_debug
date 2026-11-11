@@ -1,0 +1,54 @@
+diff --git a/gum/backend-linux/gumprocess-linux.c b/gum/backend-linux/gumprocess-linux.c
+index f922da53..3537bc65 100644
+--- a/gum/backend-linux/gumprocess-linux.c
++++ b/gum/backend-linux/gumprocess-linux.c
+@@ -24,6 +24,12 @@
+ #include <capstone.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#ifdef __has_include
++# if __has_include(<glib/ms-thread-name.h>)
++#  include <glib/ms-thread-name.h>
++#  define MS_HAVE_THREAD_NAME_REGISTRY 1
++# endif
++#endif
+ #include <sched.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -1670,6 +1671,14 @@ gum_linux_query_thread_name (GumThreadId id)
+   gchar * path;
+   gchar * comm = NULL;
+ 
++#if defined(MS_HAVE_THREAD_NAME_REGISTRY)
++  name = g_malloc (64);
++  if (ms_thread_name_lookup (id, name, 64))
++    return name;
++  g_free (name);
++  name = NULL;
++#endif
++
+   path = g_strdup_printf ("/proc/self/task/%" G_GSIZE_FORMAT "/comm", id);
+   if (!g_file_get_contents (path, &comm, NULL, NULL))
+     goto beach;
+@@ -3986,6 +3993,10 @@ gum_linux_thread_proc (gpointer param)
+ {
+   GumLinuxThreadCtx * ctx = param;
+ 
++#if defined(MS_HAVE_THREAD_NAME_REGISTRY)
++  ms_thread_name_set_current ("gum-linux-thread");
++#endif
++
+   ctx->tid = gum_process_get_current_thread_id ();
+   ctx->ret = __builtin_extract_return_addr (__builtin_return_address (0));
+ 
+@@ -3999,6 +4008,10 @@ gum_linux_thread_proc (gpointer param)
+ 
+   g_mutex_unlock (&ctx->mutex);
+ 
++#if defined(MS_HAVE_THREAD_NAME_REGISTRY)
++  ms_thread_name_unregister_current ();
++#endif
++
+   return NULL;
+ }
+ 

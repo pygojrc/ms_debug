@@ -1,0 +1,1610 @@
+diff --git a/inject/meson.build b/inject/meson.build
+index 713c731c1f3fbf5b5e6008e6c6af596eee16f240..6c7d1297594e7ecd941acfa88601c354af181bda 100644
+--- a/inject/meson.build
++++ b/inject/meson.build
+@@ -3,6 +3,16 @@ inject_sources = [
+   'inject-glue.c',
+ ]
+ 
++so_inject_sources = [
++  'so-inject.vala',
++  'inject-glue.c',
++]
++
++code_inject_sources = [
++  'code-inject.vala',
++  'inject-glue.c',
++]
++
+ system_vala_args = []
+ if host_os_family != 'windows'
+   system_vala_args += ['--pkg=posix']
+@@ -15,6 +25,20 @@ raw_inject = executable('frida-inject-raw', inject_sources,
+   dependencies: [json_glib_dep, core_dep],
+ )
+ 
++raw_so_inject = executable('frida-so-inject-raw', so_inject_sources,
++  vala_args: [core_vala_args, system_vala_args],
++  link_args: executable_no_exports_link_args,
++  link_depends: executable_no_exports_link_depends,
++  dependencies: [core_dep],
++)
++
++raw_code_inject = executable('frida-code-inject-raw', code_inject_sources,
++  vala_args: [core_vala_args, system_vala_args],
++  link_args: executable_no_exports_link_args,
++  link_depends: executable_no_exports_link_depends,
++  dependencies: [core_dep],
++)
++
+ custom_target('frida-inject',
+   input: [raw_inject, 'frida-inject.xcent'],
+   output: 'frida-inject' + exe_suffix,
+@@ -22,3 +46,19 @@ custom_target('frida-inject',
+   install: true,
+   install_dir: get_option('bindir'),
+ )
++
++custom_target('frida-so-inject',
++  input: [raw_so_inject, 'frida-inject.xcent'],
++  output: 'frida-so-inject' + exe_suffix,
++  command: post_process + ['executable', 're.frida.SoInject', '@INPUT1@'],
++  install: true,
++  install_dir: get_option('bindir'),
++)
++
++custom_target('frida-code-inject',
++  input: [raw_code_inject, 'frida-inject.xcent'],
++  output: 'frida-code-inject' + exe_suffix,
++  command: post_process + ['executable', 're.frida.CodeInject', '@INPUT1@'],
++  install: true,
++  install_dir: get_option('bindir'),
++)
+diff --git a/src/linux/frida-helper-backend-types.c b/src/linux/frida-helper-backend-types.c
+index 9513fa3b540a056346c295ee48acf9b8aed1ae50..b92acd7fda69ed259cea401a8b74d8001e90a17f 100644
+--- a/src/linux/frida-helper-backend-types.c
++++ b/src/linux/frida-helper-backend-types.c
+@@ -3,5 +3,6 @@
+ 
+ G_STATIC_ASSERT (sizeof (FridaHelperBootstrapContext) == sizeof (FridaBootstrapContext));
+ G_STATIC_ASSERT (sizeof (FridaHelperLoaderContext) == sizeof (FridaLoaderContext));
++G_STATIC_ASSERT (sizeof (FridaHelperCodeContext) == sizeof (FridaCodeContext));
+ G_STATIC_ASSERT (sizeof (FridaHelperLibcApi) == sizeof (FridaLibcApi));
+ G_STATIC_ASSERT (sizeof (FridaHelperByeMessage) == sizeof (FridaByeMessage));
+diff --git a/src/linux/frida-helper-backend.vala b/src/linux/frida-helper-backend.vala
+index b5915011250c31df0ce3328ca6a209af630021ce..44ce338f9dc28640a2b1fdc4f6fa360db140a38a 100644
+--- a/src/linux/frida-helper-backend.vala
++++ b/src/linux/frida-helper-backend.vala
+@@ -305,6 +305,36 @@ namespace Frida {
+ 			take_agent (agent);
+ 		}
+ 
++		public async void inject_code_blob (uint pid, uint8[] code, string data, Cancellable? cancellable)
++				throws Error, IOError {
++			var task = new InjectCodeTask (this, code, data);
++			yield perform<Object> (task, pid, cancellable);
++		}
++
++		public async void inject_hello_code (uint pid, string data, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_hello_bin_blob ().data, data, cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Code-only hello injection is only supported on arm64");
++#endif
++		}
++
++		public async void inject_exec_code (uint pid, string command, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_exec_bin_blob ().data, command, cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Code-only exec injection is only supported on arm64");
++#endif
++		}
++
++		public async void inject_commercial_wrapper_code (uint pid, Cancellable? cancellable) throws Error, IOError {
++#if ARM64
++			yield inject_code_blob (pid, Frida.Data.HelperBackend.get_code_commercial_wrapper_bin_blob ().data, "", cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Commercial wrapper code injection is only supported on arm64");
++#endif
++		}
++
+ 		private class InjectTask : Object, Task<RemoteAgent> {
+ 			private weak LinuxHelperBackend backend;
+ 			private InjectSpec spec;
+@@ -336,6 +366,49 @@ namespace Frida {
+ 			}
+ 		}
+ 
++		private class InjectCodeTask : Object, Task<Object> {
++			private weak LinuxHelperBackend backend;
++			private uint8[] code;
++			private string data;
++
++			public InjectCodeTask (LinuxHelperBackend backend, uint8[] code, string data) {
++				this.backend = backend;
++				this.code = code;
++				this.data = data;
++			}
++
++			public async Object run (uint pid, Cancellable? cancellable) throws Error, IOError {
++				PausedSyscallSession? pss = backend.paused_syscalls[pid];
++				if (pss != null)
++					yield pss.interrupt (cancellable);
++
++				var session = yield InjectSession.open (pid, cancellable);
++				try {
++					yield session.inject_code (code, data, cancellable);
++				} catch (Error e) {
++					try {
++						session.close ();
++					} catch (Error close_error) {
++					}
++					throw e;
++				} catch (IOError e) {
++					try {
++						session.close ();
++					} catch (Error close_error) {
++					}
++					throw e;
++				}
++
++				try {
++					session.close ();
++				} catch (Error e) {
++					throw_api_error (e);
++				}
++
++				return this;
++			}
++		}
++
+ 		public async IOStream request_control_channel (uint id, Cancellable? cancellable) throws Error, IOError {
+ 			RemoteAgent agent = agents[id];
+ 			if (agent == null)
+@@ -924,6 +997,49 @@ namespace Frida {
+ 			}
+ 		}
+ 
++		public async void inject_code (uint8[] code, string data, Cancellable? cancellable) throws Error, IOError {
++			CodeLayout code_layout = compute_code_layout (code, data);
++			BootstrapResult bootstrap_result = yield bootstrap (code_layout.size, cancellable);
++			uint64 code_base = (uintptr) bootstrap_result.context.allocation_base;
++
++			try {
++				write_memory (code_base, code);
++				maybe_fixup_helper_code (code_base, code);
++
++				var code_ctx = HelperCodeContext ();
++				code_ctx.data = (string *) (code_base + code_layout.data_offset);
++				code_ctx.libc = (HelperLibcApi *) (code_base + code_layout.libc_api_offset);
++				write_memory (code_base + code_layout.ctx_offset, (uint8[]) &code_ctx);
++				write_memory (code_base + code_layout.libc_api_offset, (uint8[]) &bootstrap_result.libc);
++				write_memory_string (code_base + code_layout.data_offset, data);
++
++				GPRegs regs = saved_regs;
++				regs.stack_pointer = bootstrap_result.allocated_stack.stack_root;
++				var call_builder = new RemoteCallBuilder (code_base, regs);
++				call_builder.add_argument (code_base + code_layout.ctx_offset);
++				RemoteCallResult code_result = yield call_builder.build (this).execute (cancellable);
++				if (code_result.status != RemoteCallStatus.COMPLETED) {
++					uint64 pc = code_result.regs.program_counter;
++					if (pc >= code_base && pc < code_base + code.length) {
++						throw new Error.NOT_SUPPORTED (
++							"Code payload crashed with signal %d at offset 0x%x\n%s",
++							code_result.stop_signal,
++							(uint) (pc - code_base),
++							code_result.regs.to_string ());
++					}
++					throw new Error.NOT_SUPPORTED ("Code payload crashed with signal %d\n%s",
++						code_result.stop_signal,
++						code_result.regs.to_string ());
++				}
++			} finally {
++				try {
++					yield deallocate_memory ((uintptr) bootstrap_result.libc.munmap, code_base,
++						bootstrap_result.context.allocation_size, null);
++				} catch (GLib.Error e) {
++				}
++			}
++		}
++
+ 		public async RemoteAgent rejuvenate (RemoteAgent old_agent, Cancellable? cancellable) throws Error, IOError {
+ 			InjectSpec spec = old_agent.inject_spec;
+ 			BootstrapResult bootstrap_result = old_agent.bootstrap_result;
+@@ -998,6 +1114,34 @@ namespace Frida {
+ 			return layout;
+ 		}
+ 
++		private struct CodeLayout {
++			public size_t size;
++
++			public size_t ctx_offset;
++			public size_t libc_api_offset;
++			public size_t data_offset;
++		}
++
++		private CodeLayout compute_code_layout (uint8[] code, string data) {
++			var layout = CodeLayout ();
++
++			size_t code_size = round_size_to_page_size (code.length);
++
++			size_t data_size = 0;
++			data_size += sizeof (HelperCodeContext);
++			data_size += sizeof (HelperLibcApi);
++			data_size += data.data.length + 1;
++			data_size = round_size_to_page_size (data_size);
++
++			layout.size = code_size + data_size;
++
++			layout.ctx_offset = code_size;
++			layout.libc_api_offset = layout.ctx_offset + sizeof (HelperCodeContext);
++			layout.data_offset = layout.libc_api_offset + sizeof (HelperLibcApi);
++
++			return layout;
++		}
++
+ 		private async RemoteAgent launch_loader (LoaderLaunch launch, InjectSpec spec, BootstrapResult bres,
+ 				UnixConnection? agent_ctrl, string fallback_address, LoaderLayout loader_layout, Cancellable? cancellable)
+ 				throws Error, IOError {
+@@ -1755,6 +1899,11 @@ namespace Frida {
+ 		void * agent_entrypoint_impl;
+ 	}
+ 
++	protected struct HelperCodeContext {
++		string * data;
++		HelperLibcApi * libc;
++	}
++
+ 	protected struct HelperLibcApi {
+ 		void * printf;
+ 		void * sprintf;
+@@ -2645,7 +2794,7 @@ namespace Frida {
+ 			bool restored = false;
+ 			try {
+ 				session.resume ();
+-				sig = yield session.wait_for_signals ({ SEGV, STOP }, cancellable);
++				sig = yield session.wait_for_signals ({ SEGV, BUS, STOP }, cancellable);
+ 
+ 				session.get_regs (&result_regs);
+ 
+diff --git a/src/linux/helpers/inject-context.h b/src/linux/helpers/inject-context.h
+index b44f06cf9ab26eedd1b37d4ba317da73e712ea2d..062b99a9bf1dc8bb10c4553b2b053fdac4dc1653 100644
+--- a/src/linux/helpers/inject-context.h
++++ b/src/linux/helpers/inject-context.h
+@@ -21,6 +21,7 @@ struct sockaddr;
+ 
+ typedef size_t FridaBootstrapStatus;
+ typedef struct _FridaBootstrapContext FridaBootstrapContext;
++typedef struct _FridaCodeContext FridaCodeContext;
+ typedef struct _FridaLoaderContext FridaLoaderContext;
+ typedef struct _FridaLibcApi FridaLibcApi;
+ typedef uint8_t FridaMessageType;
+@@ -69,6 +70,12 @@ struct _FridaLoaderContext
+   void (* agent_entrypoint_impl) (const char * data, int * unload_policy, void * injector_state);
+ };
+ 
++struct _FridaCodeContext
++{
++  const char * data;
++  FridaLibcApi * libc;
++};
++
+ struct _FridaLibcApi
+ {
+   int (* printf) (const char * format, ...);
+diff --git a/src/linux/helpers/loader.c b/src/linux/helpers/loader.c
+index 032232ed7e3f367049d4a58b3e0caac5b8eb5822..f19d1a76a83bfea5bd5e629e64999be3c25575a8 100644
+--- a/src/linux/helpers/loader.c
++++ b/src/linux/helpers/loader.c
+@@ -131,9 +131,16 @@ frida_main (void * user_data)
+       agent_codefd = -1;
+     }
+ 
+-    ctx->agent_entrypoint_impl = libc->dlsym (ctx->agent_handle, ctx->agent_entrypoint, pretend_caller_addr);
+-    if (ctx->agent_entrypoint_impl == NULL)
+-      goto dlsym_failed;
++    if (ctx->agent_entrypoint[0] != '\0')
++    {
++      ctx->agent_entrypoint_impl = libc->dlsym (ctx->agent_handle, ctx->agent_entrypoint, pretend_caller_addr);
++      if (ctx->agent_entrypoint_impl == NULL)
++        goto dlsym_failed;
++    }
++    else
++    {
++      unload_policy = FRIDA_UNLOAD_POLICY_RESIDENT;
++    }
+   }
+ 
+   agent_ctrlfd = frida_receive_fd (ctrlfd, libc);
+@@ -148,7 +155,8 @@ frida_main (void * user_data)
+   injector_state.frida_ctrlfd = ctrlfd;
+   injector_state.agent_ctrlfd = agent_ctrlfd;
+ 
+-  ctx->agent_entrypoint_impl (ctx->agent_data, &unload_policy, &injector_state);
++  if (ctx->agent_entrypoint_impl != NULL)
++    ctx->agent_entrypoint_impl (ctx->agent_data, &unload_policy, &injector_state);
+ 
+   ctrlfd = injector_state.frida_ctrlfd;
+   agent_ctrlfd = injector_state.agent_ctrlfd;
+diff --git a/src/linux/helpers/meson.build b/src/linux/helpers/meson.build
+index 32b7865e5499edc4467ff41664c118477fa91274..e1597b2ddab537bd84060667fde42d30339dee6e 100644
+--- a/src/linux/helpers/meson.build
++++ b/src/linux/helpers/meson.build
+@@ -87,6 +87,48 @@ custom_target('loader-bin',
+   install: true,
+ )
+ 
++code_hello = shared_module('code-hello', ['code-hello.c', 'syscall.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-hello-bin',
++  input: [code_hello],
++  output: ['code-hello.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
++code_exec = shared_module('code-exec', ['code-exec.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-exec-bin',
++  input: [code_exec],
++  output: ['code-exec.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
++code_commercial_wrapper = shared_module('code-commercial-wrapper', ['code-commercial-wrapper.c'],
++  name_prefix: '',
++  c_args: extra_flags,
++  link_args: extra_link_args,
++  link_depends: [helper_lds],
++)
++custom_target('code-commercial-wrapper-bin',
++  input: [code_commercial_wrapper],
++  output: ['code-commercial-wrapper.bin'],
++  command: [objcopy, objcopy_flags, '@INPUT0@', '@OUTPUT0@'],
++  install_dir: 'share' / 'frida-helpers',
++  install: true,
++)
++
+ if host_machine.system() == 'android'
+   zymbiote_flags = []
+   if host_machine.cpu_family() == 'aarch64'
+diff --git a/src/meson.build b/src/meson.build
+index ccc4f4e19edf6f929a45bd223b2b6a2dc260317c..64f4107c8644e9cb2212807dfdeed8ae7b863edd 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -381,15 +381,35 @@ if have_local_backend
+     helpers_native_dir = helpers_artifacts_dir / 'native' / host_lowlevel_abi
+     helpers_bpf_noarch_dir = helpers_artifacts_dir / 'bpf' / ('noarch-' + host_machine.endian())
+     helpers_bpf_arch_dir = helpers_artifacts_dir / 'bpf' / bpf_arch
++    helper_backend_inputs = [
++      'linux' / 'frida-helper-backend.resources',
++      helpers_native_dir / 'bootstrapper.bin',
++      helpers_native_dir / 'loader.bin',
++      helpers_bpf_noarch_dir  / 'activity-sampler.elf',
++      helpers_bpf_arch_dir  / 'spawn-gater.elf',
++      helpers_bpf_arch_dir  / 'syscall-tracer.elf',
++    ]
++    helper_backend_input_args = [
++      '@INPUT1@',
++      '@INPUT2@',
++      '@INPUT3@',
++      '@INPUT4@',
++      '@INPUT5@',
++    ]
++    if host_lowlevel_abi == 'arm64'
++      helper_backend_inputs += [
++        helpers_native_dir / 'code-hello.bin',
++        helpers_native_dir / 'code-exec.bin',
++        helpers_native_dir / 'code-commercial-wrapper.bin',
++      ]
++      helper_backend_input_args += [
++        '@INPUT6@',
++        '@INPUT7@',
++        '@INPUT8@',
++      ]
++    endif
+     helper_backend_data = custom_target('frida-data-helper-backend',
+-      input: [
+-        'linux' / 'frida-helper-backend.resources',
+-        helpers_native_dir / 'bootstrapper.bin',
+-        helpers_native_dir / 'loader.bin',
+-        helpers_bpf_noarch_dir  / 'activity-sampler.elf',
+-        helpers_bpf_arch_dir  / 'spawn-gater.elf',
+-        helpers_bpf_arch_dir  / 'syscall-tracer.elf',
+-      ],
++      input: helper_backend_inputs,
+       output: [
+         'frida-data-helper-backend.vapi',
+         'frida-data-helper-backend.h',
+@@ -400,12 +420,7 @@ if have_local_backend
+         resource_compiler_cmd_array,
+         '-c', '@INPUT0@',
+         '-o', meson.current_build_dir() / 'frida-data-helper-backend',
+-        '@INPUT1@',
+-        '@INPUT2@',
+-        '@INPUT3@',
+-        '@INPUT4@',
+-        '@INPUT5@',
+-      ],
++      ] + helper_backend_input_args,
+     )
+     helper_backend_sources += [helper_backend_data]
+     helper_backend_extra_deps = []
+--- /dev/null
++++ b/inject/code-inject.vala
+@@ -0,0 +1,156 @@
++namespace Frida.Inject {
++	private static Application application;
++
++	private static int target_pid = -1;
++	private static string? data;
++	private static string? command;
++	private static bool commercial_wrapper;
++	private static bool output_version;
++
++	const OptionEntry[] code_options = {
++		{ "pid", 'p', 0, OptionArg.INT, ref target_pid, "target PID", "PID" },
++		{ "data", 'd', 0, OptionArg.STRING, ref data, "string passed to the embedded hello payload", "DATA" },
++		{ "exec", 'x', 0, OptionArg.STRING, ref command, "shell command to execute in a forked child", "COMMAND" },
++		{ "commercial-wrapper", 0, 0, OptionArg.NONE, ref commercial_wrapper, "inject the embedded commercial wrapper scanner", null },
++		{ "version", 0, 0, OptionArg.NONE, ref output_version, "Output version information and exit", null },
++		{ null }
++	};
++
++	private static int main (string[] args) {
++#if !WINDOWS
++		Posix.setsid ();
++#endif
++
++		Environment.init ();
++
++		try {
++			var ctx = new OptionContext ();
++			ctx.set_help_enabled (true);
++			ctx.add_main_entries (code_options, null);
++			ctx.parse (ref args);
++
++			if (output_version) {
++				print ("%s\n", version_string ());
++				return 0;
++			}
++		} catch (OptionError e) {
++			printerr ("%s\n", e.message);
++			printerr ("Run '%s --help' to see a full list of available command line options.\n", args[0]);
++			return 1;
++		}
++
++		if (target_pid <= 0) {
++			printerr ("PID must be specified and greater than zero\n");
++			return 2;
++		}
++
++		bool has_command = command != null;
++		bool has_data = data != null;
++
++		int selected_modes = (has_command ? 1 : 0) + (has_data ? 1 : 0) + (commercial_wrapper ? 1 : 0);
++		if (selected_modes > 1) {
++			printerr ("--data, --exec, and --commercial-wrapper are mutually exclusive\n");
++			return 6;
++		}
++
++		if (has_command && command == "") {
++			printerr ("Command must not be empty\n");
++			return 7;
++		}
++
++		application = new Application ((uint) target_pid, data ?? "", command, commercial_wrapper);
++		return application.run ();
++	}
++
++	namespace Environment {
++		public extern void init ();
++	}
++
++	private sealed class Application : Object {
++		public uint pid {
++			get;
++			construct;
++		}
++
++		public string data {
++			get;
++			construct;
++		}
++
++		public string? command {
++			get;
++			construct;
++		}
++
++		public bool commercial_wrapper {
++			get;
++			construct;
++		}
++
++		private MainLoop loop;
++		private int exit_code;
++		private LinuxHelperBackend? helper;
++
++		public Application (uint pid, string data, string? command, bool commercial_wrapper) {
++			Object (
++				pid: pid,
++				data: data,
++				command: command,
++				commercial_wrapper: commercial_wrapper
++			);
++		}
++
++		public int run () {
++			Idle.add (() => {
++				start.begin ();
++				return false;
++			});
++
++			loop = new MainLoop ();
++			loop.run ();
++
++			return exit_code;
++		}
++
++		private async void start () {
++#if LINUX
++			try {
++				helper = new LinuxHelperBackend ();
++				if (commercial_wrapper) {
++					yield helper.inject_commercial_wrapper_code (pid, null);
++					print ("injected commercial-wrapper pid=%u\n", pid);
++				} else if (command != null) {
++					yield helper.inject_exec_code (pid, command, null);
++					print ("executed command pid=%u\n", pid);
++				} else {
++					yield helper.inject_hello_code (pid, data, null);
++					print ("injected code pid=%u\n", pid);
++				}
++				exit_code = 0;
++			} catch (GLib.Error e) {
++				printerr ("%s\n", e.message);
++				exit_code = 3;
++			}
++
++			if (helper != null) {
++				try {
++					yield helper.close (null);
++				} catch (IOError e) {
++					printerr ("Unable to close helper: %s\n", e.message);
++					if (exit_code == 0)
++						exit_code = 4;
++				}
++				helper = null;
++			}
++#else
++			printerr ("frida-code-inject is only supported on Linux/Android\n");
++			exit_code = 5;
++#endif
++
++			Idle.add (() => {
++				loop.quit ();
++				return false;
++			});
++		}
++	}
++}
+--- /dev/null
++++ b/inject/so-inject.vala
+@@ -0,0 +1,154 @@
++namespace Frida.Inject {
++	private static Application application;
++
++	private static int target_pid = -1;
++	private static string? library_path;
++	private static string? entrypoint;
++	private static string? data;
++	private static bool output_version;
++
++	const OptionEntry[] so_options = {
++		{ "pid", 'p', 0, OptionArg.INT, ref target_pid, "target PID", "PID" },
++		{ "library", 'l', 0, OptionArg.FILENAME, ref library_path, "shared library to inject", "PATH" },
++		{ "entrypoint", 'e', 0, OptionArg.STRING, ref entrypoint, "entrypoint function to call; omit for load-only dlopen", "SYMBOL" },
++		{ "data", 'd', 0, OptionArg.STRING, ref data, "string passed to the entrypoint", "DATA" },
++		{ "version", 0, 0, OptionArg.NONE, ref output_version, "Output version information and exit", null },
++		{ null }
++	};
++
++	private static int main (string[] args) {
++#if !WINDOWS
++		Posix.setsid ();
++#endif
++
++		Environment.init ();
++
++		try {
++			var ctx = new OptionContext ();
++			ctx.set_help_enabled (true);
++			ctx.add_main_entries (so_options, null);
++			ctx.parse (ref args);
++
++			if (output_version) {
++				print ("%s\n", version_string ());
++				return 0;
++			}
++		} catch (OptionError e) {
++			printerr ("%s\n", e.message);
++			printerr ("Run '%s --help' to see a full list of available command line options.\n", args[0]);
++			return 1;
++		}
++
++		if (target_pid <= 0) {
++			printerr ("PID must be specified and greater than zero\n");
++			return 2;
++		}
++
++		if (library_path == null || library_path == "") {
++			printerr ("Path to shared library must be specified\n");
++			return 3;
++		}
++
++		unowned string path = library_path;
++		string symbol = entrypoint ?? "";
++		string entrypoint_data = data ?? "";
++
++		if (!FileUtils.test (path, FileTest.EXISTS)) {
++			printerr ("Shared library does not exist: %s\n", path);
++			return 4;
++		}
++
++		uint8[] blob_data;
++		try {
++			FileUtils.get_data (path, out blob_data);
++		} catch (FileError e) {
++			printerr ("Unable to read shared library: %s\n", e.message);
++			return 4;
++		}
++
++		application = new Application ((uint) target_pid, new Bytes.take ((owned) blob_data), symbol, entrypoint_data);
++		return application.run ();
++	}
++
++	namespace Environment {
++		public extern void init ();
++	}
++
++	private sealed class Application : Object {
++		public uint pid {
++			get;
++			construct;
++		}
++
++		public Bytes library_blob {
++			get;
++			construct;
++		}
++
++		public string entrypoint {
++			get;
++			construct;
++		}
++
++		public string data {
++			get;
++			construct;
++		}
++
++		private MainLoop loop;
++		private int exit_code;
++		private Injector? injector;
++
++		public Application (uint pid, Bytes library_blob, string entrypoint, string data) {
++			Object (
++				pid: pid,
++				library_blob: library_blob,
++				entrypoint: entrypoint,
++				data: data
++			);
++		}
++
++		public int run () {
++			Idle.add (() => {
++				start.begin ();
++				return false;
++			});
++
++			loop = new MainLoop ();
++			loop.run ();
++
++			return exit_code;
++		}
++
++		private async void start () {
++			try {
++				injector = Injector.new ();
++				uint id = yield injector.inject_library_blob (pid, library_blob, entrypoint, data);
++				if (entrypoint == "")
++					print ("injected id=%u load-only\n", id);
++				else
++					print ("injected id=%u\n", id);
++				exit_code = 0;
++			} catch (GLib.Error e) {
++				printerr ("%s\n", e.message);
++				exit_code = 6;
++			}
++
++			if (injector != null) {
++				try {
++					yield injector.close ();
++				} catch (IOError e) {
++					printerr ("Unable to close injector: %s\n", e.message);
++					if (exit_code == 0)
++						exit_code = 7;
++				}
++				injector = null;
++			}
++
++			Idle.add (() => {
++				loop.quit ();
++				return false;
++			});
++		}
++	}
++}
+--- /dev/null
++++ b/src/linux/helpers/code-commercial-wrapper.c
+@@ -0,0 +1,708 @@
++#include "inject-context.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifndef NULL
++# define NULL ((void *) 0)
++#endif
++
++#ifndef PROT_READ
++# define PROT_READ 0x1
++#endif
++#ifndef PROT_WRITE
++# define PROT_WRITE 0x2
++#endif
++#ifndef MAP_PRIVATE
++# define MAP_PRIVATE 0x02
++#endif
++#ifndef MAP_ANONYMOUS
++# define MAP_ANONYMOUS 0x20
++#endif
++#ifndef O_RDONLY
++# define O_RDONLY 0
++#endif
++#ifndef ANDROID_LOG_INFO
++# define ANDROID_LOG_INFO 4
++#endif
++#ifndef ANDROID_LOG_WARN
++# define ANDROID_LOG_WARN 5
++#endif
++#ifndef ANDROID_LOG_ERROR
++# define ANDROID_LOG_ERROR 6
++#endif
++
++typedef int (* FridaAndroidLogPrintFunc) (int prio, const char * tag, const char * fmt, ...);
++typedef int (* FridaOpenFunc) (const char * pathname, int flags, ...);
++typedef ssize_t (* FridaReadFunc) (int fd, void * buf, size_t count);
++typedef unsigned int (* FridaSleepFunc) (unsigned int seconds);
++
++enum
++{
++  FRIDA_CW_MAX_RANGES = 4096,
++  FRIDA_CW_MAX_CLASSES = 256,
++  FRIDA_CW_MAX_DETAILS = 80,
++  FRIDA_CW_MAX_NAME = 160,
++  FRIDA_CW_MAPS_SIZE = 512 * 1024,
++  FRIDA_CW_WAIT_SECONDS = 3,
++  FRIDA_CW_MAX_ACTORS = 20000,
++};
++
++static const char frida_cw_log_tag[] = "CommercialWrapperLogger";
++static const char frida_cw_target_module[] = "libUE4.so";
++static const char frida_cw_prefix[] = "BP_CommercialWrapper";
++static const char frida_cw_focus_class[] = "BP_CommercialWrapper_LV4_C";
++static const char frida_cw_maps_path[] = "/proc/self/maps";
++static const char frida_cw_liblog[] = "liblog.so";
++static const char frida_cw_libc[] = "libc.so";
++static const char frida_cw_log_symbol[] = "__android_log_print";
++static const char frida_cw_open_symbol[] = "open";
++static const char frida_cw_read_symbol[] = "read";
++static const char frida_cw_sleep_symbol[] = "sleep";
++
++static const uintptr_t frida_cw_gnames_slot = 0x14e33c18;
++static const uintptr_t frida_cw_uworld_slot = 0x15772758;
++static const uintptr_t frida_cw_uworld_current_level = 0x0b0;
++static const uintptr_t frida_cw_uworld_current_level_alt = 0x0b00;
++static const uintptr_t frida_cw_ulevel_actors = 0x0a0;
++static const uintptr_t frida_cw_ulevel_owning_world = 0x0c0;
++static const uintptr_t frida_cw_uobject_class = 0x10;
++static const uintptr_t frida_cw_uobject_name = 0x18;
++static const uintptr_t frida_cw_actor_root_like = 0x260;
++static const uintptr_t frida_cw_root_like_location = 0x200;
++
++typedef struct _FridaCwRange FridaCwRange;
++typedef struct _FridaCwVec3 FridaCwVec3;
++typedef struct _FridaCwClassCount FridaCwClassCount;
++typedef struct _FridaCwDetail FridaCwDetail;
++typedef struct _FridaCwApi FridaCwApi;
++typedef struct _FridaCwState FridaCwState;
++
++struct _FridaCwRange
++{
++  uintptr_t start;
++  uintptr_t end;
++};
++
++struct _FridaCwVec3
++{
++  float x;
++  float y;
++  float z;
++};
++
++struct _FridaCwClassCount
++{
++  char name[FRIDA_CW_MAX_NAME];
++  int count;
++};
++
++struct _FridaCwDetail
++{
++  int32_t index;
++  uintptr_t actor;
++  char class_name[FRIDA_CW_MAX_NAME];
++  int is_focus;
++  int has_location;
++  FridaCwVec3 location;
++};
++
++struct _FridaCwApi
++{
++  const FridaLibcApi * libc;
++  FridaAndroidLogPrintFunc log_print;
++  FridaOpenFunc open_impl;
++  FridaReadFunc read_impl;
++  FridaSleepFunc sleep_impl;
++};
++
++struct _FridaCwState
++{
++  FridaCwRange ranges[FRIDA_CW_MAX_RANGES];
++  int range_count;
++  FridaCwClassCount class_counts[FRIDA_CW_MAX_CLASSES];
++  int class_count;
++  FridaCwDetail details[FRIDA_CW_MAX_DETAILS];
++  int detail_count;
++  char maps[FRIDA_CW_MAPS_SIZE];
++};
++
++static void * frida_cw_resolve (const FridaLibcApi * libc, const char * library, const char * symbol);
++static int frida_cw_init_api (const FridaLibcApi * libc, FridaCwApi * api);
++static int frida_cw_scan_once (FridaCwState * state, const FridaCwApi * api);
++static int frida_cw_parse_maps (FridaCwState * state, const FridaCwApi * api, uintptr_t * module_base);
++static int frida_cw_is_readable (const FridaCwState * state, uintptr_t addr, size_t size);
++static int frida_cw_read_ptr (const FridaCwState * state, uintptr_t addr, uintptr_t * out);
++static int frida_cw_read_i32 (const FridaCwState * state, uintptr_t addr, int32_t * out);
++static int frida_cw_read_vec3 (const FridaCwState * state, uintptr_t addr, FridaCwVec3 * out);
++static uintptr_t frida_cw_read_current_level (const FridaCwState * state, uintptr_t world);
++static void frida_cw_object_name (const FridaCwState * state, uintptr_t names_obj, uintptr_t object, char * out, size_t out_size);
++static void frida_cw_decode_name (const FridaCwState * state, uintptr_t names_obj, uint32_t name_index, char * out, size_t out_size);
++static void frida_cw_read_c_string (const FridaCwState * state, uintptr_t addr, char * out, size_t out_size);
++static void frida_cw_add_class_count (FridaCwState * state, const char * name);
++static void frida_cw_reset_results (FridaCwState * state);
++static int frida_cw_parse_hex (const char ** cursor, uintptr_t * value);
++static void frida_cw_skip_until (const char ** cursor, char ch);
++static void frida_cw_skip_spaces (const char ** cursor);
++static int frida_cw_read_token (const char ** cursor, char * out, size_t out_size);
++static int frida_cw_contains (const char * haystack, const char * needle);
++static int frida_cw_starts_with (const char * value, const char * prefix);
++static int frida_cw_streq (const char * a, const char * b);
++static size_t frida_cw_strlen (const char * str);
++static void frida_cw_strcpy (char * dst, size_t dst_size, const char * src);
++static void frida_cw_memcpy (void * dst, const void * src, size_t size);
++
++#define FRIDA_CW_LOG(api, prio, ...) \
++  do { \
++    if ((api)->log_print != NULL) \
++      (api)->log_print ((prio), frida_cw_log_tag, __VA_ARGS__); \
++  } while (0)
++
++__attribute__ ((section (".text.entrypoint")))
++__attribute__ ((visibility ("default")))
++void
++frida_code_commercial_wrapper (FridaCodeContext * ctx)
++{
++  FridaCwApi api;
++  FridaCwState * state;
++  int second;
++
++  if (ctx == NULL || ctx->libc == NULL)
++    return;
++  if (!frida_cw_init_api (ctx->libc, &api))
++    return;
++
++  state = (FridaCwState *) ctx->libc->mmap (NULL, sizeof (FridaCwState), PROT_READ | PROT_WRITE,
++      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (state == NULL || (uintptr_t) state == (uintptr_t) -1) {
++    FRIDA_CW_LOG (&api, ANDROID_LOG_ERROR, "failed to allocate scan state");
++    return;
++  }
++
++  FRIDA_CW_LOG (&api, ANDROID_LOG_INFO, "raw payload started");
++  for (second = 0; second < FRIDA_CW_WAIT_SECONDS; second++) {
++    if (frida_cw_scan_once (state, &api)) {
++      FRIDA_CW_LOG (&api, ANDROID_LOG_INFO, "scan finished");
++      ctx->libc->munmap (state, sizeof (FridaCwState));
++      return;
++    }
++    if (api.sleep_impl != NULL)
++      api.sleep_impl (1);
++  }
++
++  FRIDA_CW_LOG (&api, ANDROID_LOG_ERROR, "scan timeout after %d seconds", FRIDA_CW_WAIT_SECONDS);
++  ctx->libc->munmap (state, sizeof (FridaCwState));
++}
++
++static void *
++frida_cw_resolve (const FridaLibcApi * libc, const char * library, const char * symbol)
++{
++  void * handle;
++
++  if (libc->dlopen == NULL || libc->dlsym == NULL)
++    return NULL;
++
++  handle = libc->dlopen (library, libc->dlopen_flags, libc->close);
++  if (handle == NULL)
++    return NULL;
++
++  return libc->dlsym (handle, symbol, libc->close);
++}
++
++static int
++frida_cw_init_api (const FridaLibcApi * libc, FridaCwApi * api)
++{
++  api->libc = libc;
++  api->log_print = (FridaAndroidLogPrintFunc) frida_cw_resolve (libc, frida_cw_liblog, frida_cw_log_symbol);
++  api->open_impl = (FridaOpenFunc) frida_cw_resolve (libc, frida_cw_libc, frida_cw_open_symbol);
++  api->read_impl = (FridaReadFunc) frida_cw_resolve (libc, frida_cw_libc, frida_cw_read_symbol);
++  api->sleep_impl = (FridaSleepFunc) frida_cw_resolve (libc, frida_cw_libc, frida_cw_sleep_symbol);
++
++  return api->open_impl != NULL && api->read_impl != NULL && api->libc->close != NULL;
++}
++
++static int
++frida_cw_scan_once (FridaCwState * state, const FridaCwApi * api)
++{
++  uintptr_t lib_base = 0;
++  uintptr_t names_obj = 0;
++  uintptr_t world = 0;
++  uintptr_t level;
++  uintptr_t actors_data = 0;
++  int32_t actors_num = 0;
++  int matched = 0;
++  int focus_count = 0;
++  int32_t i;
++
++  frida_cw_reset_results (state);
++
++  if (!frida_cw_parse_maps (state, api, &lib_base)) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_ERROR, "failed to read /proc/self/maps");
++    return 0;
++  }
++
++  if (lib_base == 0) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_WARN, "waiting for %s", frida_cw_target_module);
++    return 0;
++  }
++
++  if (!frida_cw_read_ptr (state, lib_base + frida_cw_gnames_slot, &names_obj) || names_obj == 0) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_WARN, "libUE4 base=0x%lx but GNames is not readable", (unsigned long) lib_base);
++    return 0;
++  }
++  if (!frida_cw_read_ptr (state, lib_base + frida_cw_uworld_slot, &world) || world == 0) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_WARN, "libUE4 base=0x%lx but UWorld is not readable", (unsigned long) lib_base);
++    return 0;
++  }
++
++  level = frida_cw_read_current_level (state, world);
++  if (level == 0 ||
++      !frida_cw_read_ptr (state, level + frida_cw_ulevel_actors, &actors_data) ||
++      !frida_cw_read_i32 (state, level + frida_cw_ulevel_actors + 8, &actors_num)) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_WARN, "libUE4 base=0x%lx world=0x%lx but Actors is not readable",
++        (unsigned long) lib_base, (unsigned long) world);
++    return 0;
++  }
++
++  if (actors_data == 0 || actors_num <= 0 || actors_num > FRIDA_CW_MAX_ACTORS) {
++    FRIDA_CW_LOG (api, ANDROID_LOG_WARN,
++        "invalid Actors: libUE4 base=0x%lx world=0x%lx level=0x%lx actorsData=0x%lx actorsNum=%d",
++        (unsigned long) lib_base, (unsigned long) world, (unsigned long) level,
++        (unsigned long) actors_data, (int) actors_num);
++    return 0;
++  }
++
++  for (i = 0; i != actors_num; i++) {
++    uintptr_t actor = 0;
++    uintptr_t klass = 0;
++    char class_name[FRIDA_CW_MAX_NAME];
++    int is_focus;
++
++    if (!frida_cw_read_ptr (state, actors_data + ((uintptr_t) i * 8), &actor) || actor == 0)
++      continue;
++    if (!frida_cw_read_ptr (state, actor + frida_cw_uobject_class, &klass) || klass == 0)
++      continue;
++
++    frida_cw_object_name (state, names_obj, klass, class_name, sizeof (class_name));
++    if (!frida_cw_starts_with (class_name, frida_cw_prefix))
++      continue;
++
++    matched++;
++    frida_cw_add_class_count (state, class_name);
++    is_focus = frida_cw_streq (class_name, frida_cw_focus_class);
++    if (is_focus)
++      focus_count++;
++
++    if (state->detail_count < FRIDA_CW_MAX_DETAILS) {
++      FridaCwDetail * detail = &state->details[state->detail_count++];
++      uintptr_t root_like = 0;
++
++      detail->index = i;
++      detail->actor = actor;
++      detail->is_focus = is_focus;
++      detail->has_location = 0;
++      frida_cw_strcpy (detail->class_name, sizeof (detail->class_name), class_name);
++
++      if (frida_cw_read_ptr (state, actor + frida_cw_actor_root_like, &root_like) && root_like != 0)
++        detail->has_location = frida_cw_read_vec3 (state, root_like + frida_cw_root_like_location, &detail->location);
++    }
++  }
++
++  FRIDA_CW_LOG (api, ANDROID_LOG_INFO,
++      "libUE4 base=0x%lx namesObj=0x%lx world=0x%lx level=0x%lx actorsData=0x%lx",
++      (unsigned long) lib_base, (unsigned long) names_obj, (unsigned long) world,
++      (unsigned long) level, (unsigned long) actors_data);
++  FRIDA_CW_LOG (api, ANDROID_LOG_INFO, "scan actorsNum=%d matched=%d focus=%s count=%d",
++      (int) actors_num, matched, frida_cw_focus_class, focus_count);
++
++  for (i = 0; i != state->class_count; i++) {
++    const char * mark = frida_cw_streq (state->class_counts[i].name, frida_cw_focus_class) ? "*" : "-";
++    FRIDA_CW_LOG (api, ANDROID_LOG_INFO, "%s class=%s count=%d",
++        mark, state->class_counts[i].name, state->class_counts[i].count);
++  }
++
++  for (i = 0; i != state->detail_count; i++) {
++    const FridaCwDetail * detail = &state->details[i];
++    const char * mark = detail->is_focus ? "*" : "-";
++    if (detail->has_location) {
++      FRIDA_CW_LOG (api, ANDROID_LOG_INFO,
++          "%s i=%d class=%s actor=0x%lx loc=(%.1f, %.1f, %.1f)m",
++          mark, (int) detail->index, detail->class_name, (unsigned long) detail->actor,
++          detail->location.x / 100.0f, detail->location.y / 100.0f, detail->location.z / 100.0f);
++    } else {
++      FRIDA_CW_LOG (api, ANDROID_LOG_INFO, "%s i=%d class=%s actor=0x%lx loc=unreadable",
++          mark, (int) detail->index, detail->class_name, (unsigned long) detail->actor);
++    }
++  }
++
++  if (matched > FRIDA_CW_MAX_DETAILS)
++    FRIDA_CW_LOG (api, ANDROID_LOG_INFO, "details truncated: shown=%d total=%d", FRIDA_CW_MAX_DETAILS, matched);
++
++  return 1;
++}
++
++static int
++frida_cw_parse_maps (FridaCwState * state, const FridaCwApi * api, uintptr_t * module_base)
++{
++  int fd;
++  ssize_t n;
++  size_t size = 0;
++  const char * cursor;
++
++  state->range_count = 0;
++  *module_base = 0;
++
++  fd = api->open_impl (frida_cw_maps_path, O_RDONLY);
++  if (fd < 0)
++    return 0;
++
++  while (size < FRIDA_CW_MAPS_SIZE - 1) {
++    n = api->read_impl (fd, state->maps + size, FRIDA_CW_MAPS_SIZE - 1 - size);
++    if (n <= 0)
++      break;
++    size += (size_t) n;
++  }
++  api->libc->close (fd);
++  state->maps[size] = '\0';
++
++  cursor = state->maps;
++  while (*cursor != '\0') {
++    uintptr_t start = 0;
++    uintptr_t end = 0;
++    char perms[8];
++    const char * line_start = cursor;
++    const char * path;
++    int readable;
++
++    if (!frida_cw_parse_hex (&cursor, &start))
++      goto next_line;
++    if (*cursor != '-')
++      goto next_line;
++    cursor++;
++    if (!frida_cw_parse_hex (&cursor, &end))
++      goto next_line;
++
++    frida_cw_skip_spaces (&cursor);
++    if (!frida_cw_read_token (&cursor, perms, sizeof (perms)))
++      goto next_line;
++    readable = perms[0] == 'r';
++
++    frida_cw_read_token (&cursor, NULL, 0);
++    frida_cw_read_token (&cursor, NULL, 0);
++    frida_cw_read_token (&cursor, NULL, 0);
++    frida_cw_skip_spaces (&cursor);
++    path = cursor;
++
++    if (readable && state->range_count < FRIDA_CW_MAX_RANGES) {
++      FridaCwRange * range = &state->ranges[state->range_count++];
++      range->start = start;
++      range->end = end;
++    }
++
++    if (frida_cw_contains (path, frida_cw_target_module) && (*module_base == 0 || start < *module_base))
++      *module_base = start;
++
++next_line:
++    cursor = line_start;
++    frida_cw_skip_until (&cursor, '\n');
++    if (*cursor == '\n')
++      cursor++;
++  }
++
++  return 1;
++}
++
++static int
++frida_cw_is_readable (const FridaCwState * state, uintptr_t addr, size_t size)
++{
++  int i;
++
++  if (addr == 0 || size == 0 || addr + size < addr)
++    return 0;
++
++  for (i = 0; i != state->range_count; i++) {
++    const FridaCwRange * range = &state->ranges[i];
++    if (addr >= range->start && addr + size <= range->end)
++      return 1;
++  }
++
++  return 0;
++}
++
++static int
++frida_cw_read_ptr (const FridaCwState * state, uintptr_t addr, uintptr_t * out)
++{
++  uint64_t value;
++
++  if (!frida_cw_is_readable (state, addr, sizeof (value)))
++    return 0;
++
++  frida_cw_memcpy (&value, (const void *) addr, sizeof (value));
++  *out = (uintptr_t) value;
++  return 1;
++}
++
++static int
++frida_cw_read_i32 (const FridaCwState * state, uintptr_t addr, int32_t * out)
++{
++  if (!frida_cw_is_readable (state, addr, sizeof (*out)))
++    return 0;
++
++  frida_cw_memcpy (out, (const void *) addr, sizeof (*out));
++  return 1;
++}
++
++static int
++frida_cw_read_vec3 (const FridaCwState * state, uintptr_t addr, FridaCwVec3 * out)
++{
++  if (!frida_cw_is_readable (state, addr, sizeof (*out)))
++    return 0;
++
++  frida_cw_memcpy (out, (const void *) addr, sizeof (*out));
++  return 1;
++}
++
++static uintptr_t
++frida_cw_read_current_level (const FridaCwState * state, uintptr_t world)
++{
++  uintptr_t level_a = 0;
++  uintptr_t level_b = 0;
++  uintptr_t candidates[2];
++  int i;
++
++  frida_cw_read_ptr (state, world + frida_cw_uworld_current_level, &level_a);
++  frida_cw_read_ptr (state, world + frida_cw_uworld_current_level_alt, &level_b);
++  candidates[0] = level_a;
++  candidates[1] = level_b;
++
++  for (i = 0; i != 2; i++) {
++    uintptr_t owning_world = 0;
++    if (candidates[i] != 0 &&
++        frida_cw_read_ptr (state, candidates[i] + frida_cw_ulevel_owning_world, &owning_world) &&
++        owning_world == world) {
++      return candidates[i];
++    }
++  }
++
++  return level_a != 0 ? level_a : level_b;
++}
++
++static void
++frida_cw_object_name (const FridaCwState * state, uintptr_t names_obj, uintptr_t object, char * out, size_t out_size)
++{
++  uint32_t name_index = 0;
++
++  if (out_size != 0)
++    out[0] = '\0';
++  if (object == 0 || !frida_cw_is_readable (state, object + frida_cw_uobject_name, sizeof (name_index)))
++    return;
++
++  frida_cw_memcpy (&name_index, (const void *) (object + frida_cw_uobject_name), sizeof (name_index));
++  frida_cw_decode_name (state, names_obj, name_index, out, out_size);
++}
++
++static void
++frida_cw_decode_name (const FridaCwState * state, uintptr_t names_obj, uint32_t name_index, char * out, size_t out_size)
++{
++  uintptr_t chunk = 0;
++  uintptr_t entry = 0;
++
++  if (out_size != 0)
++    out[0] = '\0';
++  if (name_index == 0 || names_obj == 0)
++    return;
++
++  if (!frida_cw_read_ptr (state, names_obj + (((uintptr_t) name_index >> 14) * 8), &chunk) || chunk == 0)
++    return;
++  if (!frida_cw_read_ptr (state, chunk + (((uintptr_t) name_index & 0x3fff) * 8), &entry) || entry == 0)
++    return;
++
++  frida_cw_read_c_string (state, entry + 0x0c, out, out_size);
++}
++
++static void
++frida_cw_read_c_string (const FridaCwState * state, uintptr_t addr, char * out, size_t out_size)
++{
++  size_t i;
++
++  if (out_size == 0)
++    return;
++
++  for (i = 0; i + 1 < out_size; i++) {
++    char ch = '\0';
++    if (!frida_cw_is_readable (state, addr + i, 1))
++      break;
++    ch = *((const char *) (addr + i));
++    if (ch == '\0')
++      break;
++    out[i] = ch;
++  }
++  out[i] = '\0';
++}
++
++static void
++frida_cw_add_class_count (FridaCwState * state, const char * name)
++{
++  int i;
++
++  for (i = 0; i != state->class_count; i++) {
++    if (frida_cw_streq (state->class_counts[i].name, name)) {
++      state->class_counts[i].count++;
++      return;
++    }
++  }
++
++  if (state->class_count < FRIDA_CW_MAX_CLASSES) {
++    FridaCwClassCount * count = &state->class_counts[state->class_count++];
++    frida_cw_strcpy (count->name, sizeof (count->name), name);
++    count->count = 1;
++  }
++}
++
++static void
++frida_cw_reset_results (FridaCwState * state)
++{
++  state->range_count = 0;
++  state->class_count = 0;
++  state->detail_count = 0;
++}
++
++static int
++frida_cw_parse_hex (const char ** cursor, uintptr_t * value)
++{
++  uintptr_t result = 0;
++  int seen = 0;
++
++  while (1) {
++    char ch = **cursor;
++    int digit;
++
++    if (ch >= '0' && ch <= '9')
++      digit = ch - '0';
++    else if (ch >= 'a' && ch <= 'f')
++      digit = ch - 'a' + 10;
++    else if (ch >= 'A' && ch <= 'F')
++      digit = ch - 'A' + 10;
++    else
++      break;
++
++    result = (result << 4) | (uintptr_t) digit;
++    (*cursor)++;
++    seen = 1;
++  }
++
++  *value = result;
++  return seen;
++}
++
++static void
++frida_cw_skip_until (const char ** cursor, char ch)
++{
++  while (**cursor != '\0' && **cursor != ch)
++    (*cursor)++;
++}
++
++static void
++frida_cw_skip_spaces (const char ** cursor)
++{
++  while (**cursor == ' ' || **cursor == '\t')
++    (*cursor)++;
++}
++
++static int
++frida_cw_read_token (const char ** cursor, char * out, size_t out_size)
++{
++  size_t n = 0;
++
++  frida_cw_skip_spaces (cursor);
++  if (**cursor == '\0' || **cursor == '\n')
++    return 0;
++
++  while (**cursor != '\0' && **cursor != '\n' && **cursor != ' ' && **cursor != '\t') {
++    if (out != NULL && n + 1 < out_size)
++      out[n++] = **cursor;
++    (*cursor)++;
++  }
++
++  if (out != NULL && out_size != 0)
++    out[n] = '\0';
++
++  return 1;
++}
++
++static int
++frida_cw_contains (const char * haystack, const char * needle)
++{
++  size_t needle_size = frida_cw_strlen (needle);
++
++  if (needle_size == 0)
++    return 1;
++
++  while (*haystack != '\0' && *haystack != '\n') {
++    size_t i;
++    for (i = 0; i != needle_size; i++) {
++      if (haystack[i] == '\0' || haystack[i] == '\n' || haystack[i] != needle[i])
++        break;
++    }
++    if (i == needle_size)
++      return 1;
++    haystack++;
++  }
++
++  return 0;
++}
++
++static int
++frida_cw_starts_with (const char * value, const char * prefix)
++{
++  while (*prefix != '\0') {
++    if (*value++ != *prefix++)
++      return 0;
++  }
++  return 1;
++}
++
++static int
++frida_cw_streq (const char * a, const char * b)
++{
++  while (*a != '\0' && *b != '\0') {
++    if (*a++ != *b++)
++      return 0;
++  }
++  return *a == *b;
++}
++
++static size_t
++frida_cw_strlen (const char * str)
++{
++  size_t n = 0;
++
++  while (str[n] != '\0')
++    n++;
++
++  return n;
++}
++
++static void
++frida_cw_strcpy (char * dst, size_t dst_size, const char * src)
++{
++  size_t i;
++
++  if (dst_size == 0)
++    return;
++
++  for (i = 0; i + 1 < dst_size && src[i] != '\0'; i++)
++    dst[i] = src[i];
++  dst[i] = '\0';
++}
++
++static void
++frida_cw_memcpy (void * dst, const void * src, size_t size)
++{
++  uint8_t * d = (uint8_t *) dst;
++  const uint8_t * s = (const uint8_t *) src;
++  size_t i;
++
++  for (i = 0; i != size; i++)
++    d[i] = s[i];
++}
+--- /dev/null
++++ b/src/linux/helpers/code-exec.c
+@@ -0,0 +1,78 @@
++#include "inject-context.h"
++
++#include <stddef.h>
++
++typedef int (* FridaForkFunc) (void);
++typedef int (* FridaSetsidFunc) (void);
++typedef int (* FridaExecveFunc) (const char * pathname, char * const argv[], char * const envp[]);
++typedef void (* FridaExitFunc) (int status);
++
++static const char frida_libc_library[] = "libc.so";
++static const char frida_fork_symbol[] = "fork";
++static const char frida_setsid_symbol[] = "setsid";
++static const char frida_execve_symbol[] = "execve";
++static const char frida_exit_symbol[] = "_exit";
++static const char frida_shell_path[] = "/system/bin/sh";
++static const char frida_shell_name[] = "sh";
++static const char frida_shell_arg[] = "-c";
++static const char frida_path_env[] = "PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/tmp";
++
++static void * frida_resolve_libc_symbol (const FridaLibcApi * libc, void * handle, const char * symbol);
++
++__attribute__ ((section (".text.entrypoint")))
++__attribute__ ((visibility ("default")))
++void
++frida_code_exec (FridaCodeContext * ctx)
++{
++  const FridaLibcApi * libc = ctx->libc;
++  const void * pretend_caller_addr = libc->close;
++  void * libc_handle;
++  FridaForkFunc fork_impl;
++  FridaSetsidFunc setsid_impl;
++  FridaExecveFunc execve_impl;
++  FridaExitFunc exit_impl;
++  int child;
++
++  if (ctx->data == NULL || ctx->data[0] == '\0')
++    return;
++  if (libc->dlopen == NULL || libc->dlsym == NULL)
++    return;
++
++  libc_handle = libc->dlopen (frida_libc_library, libc->dlopen_flags, pretend_caller_addr);
++  if (libc_handle == NULL)
++    return;
++
++  fork_impl = (FridaForkFunc) frida_resolve_libc_symbol (libc, libc_handle, frida_fork_symbol);
++  setsid_impl = (FridaSetsidFunc) frida_resolve_libc_symbol (libc, libc_handle, frida_setsid_symbol);
++  execve_impl = (FridaExecveFunc) frida_resolve_libc_symbol (libc, libc_handle, frida_execve_symbol);
++  exit_impl = (FridaExitFunc) frida_resolve_libc_symbol (libc, libc_handle, frida_exit_symbol);
++  if (fork_impl == NULL || setsid_impl == NULL || execve_impl == NULL || exit_impl == NULL)
++    return;
++
++  child = fork_impl ();
++  if (child != 0)
++    return;
++
++  {
++    char * const argv[] = {
++      (char *) frida_shell_name,
++      (char *) frida_shell_arg,
++      (char *) ctx->data,
++      NULL
++    };
++    char * const envp[] = {
++      (char *) frida_path_env,
++      NULL
++    };
++
++    setsid_impl ();
++    execve_impl (frida_shell_path, argv, envp);
++    exit_impl (127);
++  }
++}
++
++static void *
++frida_resolve_libc_symbol (const FridaLibcApi * libc, void * handle, const char * symbol)
++{
++  return libc->dlsym (handle, symbol, libc->close);
++}
+--- /dev/null
++++ b/src/linux/helpers/code-hello.c
+@@ -0,0 +1,55 @@
++#include "inject-context.h"
++#include "syscall.h"
++
++#include <stddef.h>
++#include <sys/syscall.h>
++
++#ifndef __ANDROID_LOG_INFO
++# define __ANDROID_LOG_INFO 4
++#endif
++
++typedef int (* FridaAndroidLogPrintFunc) (int prio, const char * tag, const char * fmt, ...);
++
++static const char frida_log_library[] = "liblog.so";
++static const char frida_log_symbol[] = "__android_log_print";
++static const char frida_log_tag[] = "HELLO_INJECT";
++static const char frida_log_format[] = "hello %s pid=%d";
++static const char frida_empty_string[] = "";
++
++static FridaAndroidLogPrintFunc frida_resolve_log_print (const FridaLibcApi * libc);
++static int frida_getpid (void);
++
++__attribute__ ((section (".text.entrypoint")))
++__attribute__ ((visibility ("default")))
++void
++frida_code_hello (FridaCodeContext * ctx)
++{
++  const FridaLibcApi * libc = ctx->libc;
++  FridaAndroidLogPrintFunc log_print = frida_resolve_log_print (libc);
++  const char * data = (ctx->data != NULL) ? ctx->data : frida_empty_string;
++
++  if (log_print != NULL)
++    log_print (__ANDROID_LOG_INFO, frida_log_tag, frida_log_format, data, frida_getpid ());
++}
++
++static FridaAndroidLogPrintFunc
++frida_resolve_log_print (const FridaLibcApi * libc)
++{
++  void * handle;
++  const void * pretend_caller_addr = libc->close;
++
++  if (libc->dlopen == NULL || libc->dlsym == NULL)
++    return NULL;
++
++  handle = libc->dlopen (frida_log_library, libc->dlopen_flags, pretend_caller_addr);
++  if (handle == NULL)
++    return NULL;
++
++  return (FridaAndroidLogPrintFunc) libc->dlsym (handle, frida_log_symbol, pretend_caller_addr);
++}
++
++static int
++frida_getpid (void)
++{
++  return (int) frida_syscall_0 (__NR_getpid);
++}

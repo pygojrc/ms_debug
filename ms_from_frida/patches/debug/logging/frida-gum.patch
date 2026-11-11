@@ -1,0 +1,114 @@
+diff --git a/bindings/gumjs/gumscriptscheduler.c b/bindings/gumjs/gumscriptscheduler.c
+index b86a6c57..7de5f5f4 100644
+--- a/bindings/gumjs/gumscriptscheduler.c
++++ b/bindings/gumjs/gumscriptscheduler.c
+@@ -6,6 +6,10 @@
+ 
+ #include "gumscriptscheduler.h"
+ 
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
++
+ struct _GumScriptScheduler
+ {
+   GObject parent;
+@@ -114,6 +118,8 @@ gum_script_scheduler_start (GumScriptScheduler * self)
+   {
+     self->js_loop = g_main_loop_new (self->js_context, TRUE);
+ 
++    MY_OBS_LOG ("script scheduler start thread_name=gum-js-loop");
++
+     self->js_thread = g_thread_new ("gum-js-loop",
+         (GThreadFunc) gum_script_scheduler_run_js_loop, self);
+   }
+@@ -124,6 +130,7 @@ gum_script_scheduler_stop (GumScriptScheduler * self)
+ {
+   if (self->js_thread != NULL)
+   {
++    MY_OBS_LOG ("script scheduler stop");
+     gum_script_scheduler_push_job_on_js_thread (self, G_PRIORITY_LOW,
+         (GumScriptJobFunc) g_main_loop_quit, self->js_loop, NULL);
+     g_thread_join (self->js_thread);
+diff --git a/gum/backend-arm64/guminterceptor-arm64.c b/gum/backend-arm64/guminterceptor-arm64.c
+index 1b8cf588..b0d6a21d 100644
+--- a/gum/backend-arm64/guminterceptor-arm64.c
++++ b/gum/backend-arm64/guminterceptor-arm64.c
+@@ -30,6 +30,10 @@
+ #endif
+ 
+ 
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
++
+ #define GUM_INTERCEPTOR_FULL_REDIRECT_SIZE 16
+ #define GUM_INTERCEPTOR_PRETTY_METHOD_REDIRECT_SIZE 24
+ 
+@@ -703,6 +707,8 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
+ 
+   *need_deflector = FALSE;
+ 
++  MY_OBS_LOG ("arm64 prepare function=%p", function_address);
++
+   data->scratch_reg = ctx->scratch_register;
+ 
+ 
+@@ -1175,6 +1181,8 @@ _gum_interceptor_backend_activate_trampoline (GumInterceptorBackend * self,
+   }
+   else
+   {
++    MY_OBS_LOG ("arm64 activate function=%p size=%u",
++        ctx->function_address, data->redirect_code_size);
+     switch (data->redirect_code_size)
+     {
+       case 4:
+diff --git a/gum/gum.c b/gum/gum.c
+index 58e83a94..fdfae1ea 100644
+--- a/gum/gum.c
++++ b/gum/gum.c
+@@ -8,6 +8,11 @@
+ 
+ #include "gum.h"
+ 
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
++
++
+ #include "gum-init.h"
+ #include "gumexceptorbackend.h"
+ #include "guminterceptor-priv.h"
+@@ -302,6 +307,8 @@ gum_init_embedded (void)
+   g_log_set_default_handler (gum_on_log_message, NULL);
+   gum_do_init ();
+ 
++  MY_OBS_LOG ("gum init");
++
+   g_set_prgname ("frida");
+ 
+ #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
+diff --git a/gum/gumelfmodule.c b/gum/gumelfmodule.c
+index 0004a2b0..4434ba65 100644
+--- a/gum/gumelfmodule.c
++++ b/gum/gumelfmodule.c
+@@ -25,6 +25,10 @@
+ 
+ #include <string.h>
+ 
++/* ms_debug: 统一走 GLib 日志路由（Linux stderr / Windows OutputDebugString）。 */
++#define MY_OBS_LOG(...) \
++    g_log ("MYOBS", G_LOG_LEVEL_INFO, __VA_ARGS__)
++
+ 
+ #define GUM_ELF_DEFAULT_MAPPED_SIZE (64 * 1024)
+ #define GUM_ELF_PAGE_START(value, page_size) \
+@@ -543,6 +547,8 @@ gboolean
+ gum_elf_module_load (GumElfModule * self,
+                      GError ** error)
+ {
++  MY_OBS_LOG ("elf load begin path=%s",
++      self->source_path != NULL ? self->source_path : "<blob>");
+   GError * local_error = NULL;
+ 
+   if (self->file_bytes != NULL)

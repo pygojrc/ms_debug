@@ -1,0 +1,124 @@
+diff --git a/src/linux/frida-helper-backend.vala b/src/linux/frida-helper-backend.vala
+index b5915011250c31df0ce3328ca6a209af630021ce..a4a2a22a19478e0a5a2e7f0dfa584a75cb343488 100644
+--- a/src/linux/frida-helper-backend.vala
++++ b/src/linux/frida-helper-backend.vala
+@@ -840,6 +840,9 @@ namespace Frida {
+ 
+ 		private static ProcMapsSnapshot.Mapping? local_android_ld;
+ 
++		private ThreadSuspendScope? group_stop_scope;
++		private bool group_stop_enabled = false;
++
+ 		static construct {
+ 			var libc = Gum.Process.get_libc_module ();
+ 			uint local_pid = Posix.getpid ();
+@@ -877,14 +880,61 @@ namespace Frida {
+ 			var session = new InjectSession (pid);
+ 
+ 			try {
++				/*
++				 * 起点读书会在其它线程运行时检测 TracerPid。这里先让整个进程
++				 * 进入 group-stop，再 attach/暂停线程，避免检测线程在注入准备
++				 * 期间继续运行。
++				 */
++				Posix.kill ((Posix.pid_t) pid, Posix.Signal.STOP);
++				yield delay (200);
++				SeizeSession.keep_group_stopped_during_init = true;
+ 				yield session.init_async (Priority.DEFAULT, cancellable);
++				var scope = new ThreadSuspendScope (pid);
++				scope.exclude (session.tid);
++				yield scope.enable (cancellable);
++				session.group_stop_scope = scope;
++				session.group_stop_enabled = true;
++				SeizeSession.keep_group_stopped_during_init = false;
++				Posix.kill ((Posix.pid_t) pid, Posix.Signal.CONT);
+ 			} catch (GLib.Error e) {
++				SeizeSession.keep_group_stopped_during_init = false;
++				try {
++					session.close ();
++				} catch (Error close_error) {
++				}
++				Posix.kill ((Posix.pid_t) pid, Posix.Signal.CONT);
+ 				throw_api_error (e);
+ 			}
+ 
+ 			return session;
+ 		}
+ 
++		private static async void delay (uint milliseconds) {
++			var source = new TimeoutSource (milliseconds);
++			source.set_callback (delay.callback);
++			source.attach (MainContext.get_thread_default ());
++			yield;
++			source.destroy ();
++		}
++
++		public new void close () throws Error {
++			/*
++			 * 先 detach 执行线程，再恢复其它线程。否则其它线程恢复后会在
++			 * 短窗口内看到 TracerPid != 0，起点读书会直接结束主进程。
++			 */
++			base.close ();
++
++			if (group_stop_scope != null) {
++				group_stop_scope.disable ();
++				group_stop_scope = null;
++			}
++
++			if (group_stop_enabled) {
++				group_stop_enabled = false;
++				Posix.kill ((Posix.pid_t) pid, Posix.Signal.CONT);
++			}
++		}
++
+ 		public async RemoteAgent inject (InjectSpec spec, Cancellable? cancellable) throws Error, IOError {
+ 			string fallback_address = make_fallback_address ();
+ 			LoaderLayout loader_layout = compute_loader_layout (spec, fallback_address);
+@@ -1851,6 +1901,7 @@ namespace Frida {
+ 		private uint _tid;
+ 		protected GPRegs saved_regs;
+ 
++		public static bool keep_group_stopped_during_init = false;
+ 		private static bool seize_supported;
+ 		private static bool regset_supported = true;
+ 		protected static ProcessVmIoFunc? process_vm_readv;
+@@ -1916,21 +1967,26 @@ namespace Frida {
+ 						if (res == -1)
+ 							throw_ptrace_error (req, pid, errsv);
+ 
+-						attach_state = ATTACHED;
+-
+-						if (seize_supported) {
+-							if (was_stopped) {
+-								was_group_stopped = true;
+-								yield wait_for_next_stop (cancellable);
+-								Posix.kill ((Posix.pid_t) pid, Posix.Signal.CONT);
++							attach_state = ATTACHED;
++
++							if (seize_supported) {
++								if (was_stopped) {
++									if (keep_group_stopped_during_init) {
++										/* 目标已经处于 group-stop；这里只建立 ptrace 关系，
++										 * 不等待额外 stop 事件，避免在 Android 上卡住。 */
++									} else {
++										was_group_stopped = true;
++										yield wait_for_next_stop (cancellable);
++										Posix.kill ((Posix.pid_t) pid, Posix.Signal.CONT);
++									}
++								} else {
++									ptrace (INTERRUPT, tid);
++									yield wait_for_signal (TRAP, cancellable);
++								}
+ 							} else {
+-								ptrace (INTERRUPT, tid);
+-								yield wait_for_signal (TRAP, cancellable);
++								yield wait_for_signal (STOP, cancellable);
++								ptrace (SETOPTIONS, tid, null, (void *) options);
+ 							}
+-						} else {
+-							yield wait_for_signal (STOP, cancellable);
+-							ptrace (SETOPTIONS, tid, null, (void *) options);
+-						}
+ 
+ 						get_regs (&saved_regs);
+ 					}

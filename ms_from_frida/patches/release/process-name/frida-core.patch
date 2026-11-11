@@ -1,0 +1,42 @@
+diff --git a/server/server.vala b/server/server.vala
+index 0d72d59..08f63b8 100644
+--- a/server/server.vala
++++ b/server/server.vala
+@@ -1,7 +1,16 @@
+ namespace Frida.Server {
++	/* ms_debug: 进程/线程可见名统一由 GLib 层设置；g_set_prgname 同步
++	 * 进程内 GLib 状态，ms_process_name_set_current 写入内核可见名
++	 * （Linux prctl / Windows SetThreadDescription）。 */
++	[CCode (cname = "g_set_prgname")]
++	extern static void g_set_prgname (string prgname);
++
++	[CCode (cname = "ms_process_name_set_current")]
++	extern static void ms_process_name_set_current (string name);
++
+ 	private static Application application;
+ 
+-	private const string DEFAULT_DIRECTORY = "re.frida.server";
++	private const string DEFAULT_DIRECTORY = "re.ms.server";
+ 	private static bool output_version = false;
+ 	private static string? device_id = null;
+ 	private static string? listen_address = null;
+@@ -54,6 +63,10 @@ namespace Frida.Server {
+ 	private static int main (string[] args) {
+ 		Environment.init ();
+ 
++		/* ms_debug: 进程名伪装；注入 agent 不调用这里，避免污染目标线程名。 */
++		g_set_prgname ("gogogo");
++		ms_process_name_set_current ("gogogo");
++
+ #if DARWIN
+ 		if (Path.get_basename (args[0]) == "frida-policyd") {
+ 			return Policyd._main ();
+@@ -178,7 +191,7 @@ namespace Frida.Server {
+ 		Environment.configure ();
+ 
+ #if DARWIN
+-		var worker = new Thread<int> ("frida-server-main-loop", () => {
++		var worker = new Thread<int> ("ms-server-main-loop", () => {
+ 			var exit_code = run_application (device_id, endpoint_params, options, on_ready);
+ 
+ 			_stop_run_loop ();

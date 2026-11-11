@@ -1,0 +1,56 @@
+diff --git a/gio/gtask.c b/gio/gtask.c
+index d658e56ce862a30869a064a0a0679c0f2c90e8b7..ce9dbceba8d4d86c4e9bc80d0c2452c333b9b747 100644
+--- a/gio/gtask.c
++++ b/gio/gtask.c
+@@ -640,6 +640,19 @@ static gint tasks_running;
+ static guint task_pool_max_counter;
+ static guint tasks_running_counter;
+ 
++static gboolean
++my_gadget_stop_after (const gchar * stage)
++{
++  gchar * path;
++  gboolean stop;
++
++  path = g_strconcat ("/data/local/tmp/mygadget.stop.", stage, NULL);
++  stop = g_file_test (path, G_FILE_TEST_EXISTS);
++  g_free (path);
++
++  return stop;
++}
++
+ /* When the task pool fills up and blocks, and the program keeps
+  * queueing more tasks, we will slowly add more threads to the pool
+  * (in case the existing tasks are trying to queue subtasks of their
+@@ -822,15 +835,31 @@ g_task_new (gpointer              source_object,
+   GSource *source;
+ 
+   task = g_object_new (G_TYPE_TASK, NULL);
++  if (my_gadget_stop_after ("gtask-after-object-new"))
++    return task;
+   task->source_object = source_object ? g_object_ref (source_object) : NULL;
++  if (my_gadget_stop_after ("gtask-after-source-object"))
++    return task;
+   task->cancellable = cancellable ? g_object_ref (cancellable) : NULL;
++  if (my_gadget_stop_after ("gtask-after-cancellable"))
++    return task;
+   task->callback = callback;
++  if (my_gadget_stop_after ("gtask-after-callback"))
++    return task;
+   task->callback_data = callback_data;
++  if (my_gadget_stop_after ("gtask-after-callback-data"))
++    return task;
+   task->context = g_main_context_ref_thread_default ();
++  if (my_gadget_stop_after ("gtask-after-context"))
++    return task;
+ 
+   source = g_main_current_source ();
++  if (my_gadget_stop_after ("gtask-after-current-source"))
++    return task;
+   if (source)
+     task->creation_time = g_source_get_time (source);
++  if (my_gadget_stop_after ("gtask-after-creation-time"))
++    return task;
+ 
+   TRACE (GIO_TASK_NEW (task, source_object, cancellable,
+                        callback, callback_data));
