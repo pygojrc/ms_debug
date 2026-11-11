@@ -13,6 +13,10 @@ if ($env:GITHUB_ACTIONS -ne "true") {
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $SourceDir = (Resolve-Path $SourceDir).Path
 
+# glib 的 gdbus-codegen 仍 import distutils（Python 3.12 已移除），由 setuptools 提供兼容层。
+& python -m pip install --quiet --disable-pip-version-check setuptools
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # 读取固定版本配置（versions.env 为 shell 格式的 KEY=VALUE）。
 $versions = @{}
 Get-Content (Join-Path $RepoRoot "ms_from_frida\config\versions.env") | ForEach-Object {
