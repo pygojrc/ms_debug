@@ -13,6 +13,7 @@ Workflow 会从 [`config/versions.env`](config/versions.env) 的固定 commit ch
 - [`patches/`](patches/)：当前活动 patch，按 release/debug 和目的拆分。
 - [`files/frida-core/`](files/frida-core/)：已审计的 Android helper 资源。
 - [`config/versions.env`](config/versions.env)：Frida、子模块和依赖的固定 commit。
+- [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md)：全部改动的作用、实现手法与跨版本适配指南。
 - [`reports/`](reports/)：既有构建/对比报告，仅作历史证据。
 - [`docs/legacy-build-workflow.yml`](docs/legacy-build-workflow.yml)：已停用的旧 workflow 历史归档。
 
