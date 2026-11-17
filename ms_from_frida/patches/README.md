@@ -1,6 +1,6 @@
 # 当前活动 patch 分类
 
-> 每个 patch 的目的、机制、跨版本适配锚点见 [`../docs/IMPLEMENTATION.md`](../docs/IMPLEMENTATION.md)。
+> 每个改动项的目的、机制、跨版本适配锚点见 [`../docs/IMPLEMENTATION.md`](../docs/IMPLEMENTATION.md)（该文档只依赖 Frida 上游源码，可脱离本仓库单独使用）。
 
 当前 patch 从官方 Frida 17.15.3 固定 commit 的干净源码开始应用。每个 patch 只承担一个目的，便于 release/debug 组合和二分定位。
 
