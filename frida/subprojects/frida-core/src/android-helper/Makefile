@@ -1,18 +1,21 @@
 ANDROID_API_LEVEL ?= 19
 ANDROID_SDK_ROOT ?= $(shell echo ~/Android/Sdk)
+JAVAC ?= javac
+JAR ?= jar
+D8 ?= d8
 
 android_platform := android-$(ANDROID_API_LEVEL)
 android_jar := $(ANDROID_SDK_ROOT)/platforms/$(android_platform)/android.jar
 
 helper.dex: build/frida-helper.jar
-	d8 \
+	$(D8) \
 		--classpath $(android_jar) \
 		--output build/ \
 		$<
 	mv build/classes.dex $@
 
 build/frida-helper.jar: re/frida/Helper.java re/frida/HelperBackend.java
-	javac \
+	$(JAVAC) \
 		-cp .:$(android_jar) \
 		-bootclasspath $(android_jar) \
 		-source 1.8 \
@@ -21,4 +24,4 @@ build/frida-helper.jar: re/frida/Helper.java re/frida/HelperBackend.java
 		-Xlint:unchecked \
 		$^ \
 		-d build/java/
-	jar cfe $@ re.frida.Helper -C build/java/ .
+	$(JAR) cfe $@ re.frida.Helper -C build/java/ .

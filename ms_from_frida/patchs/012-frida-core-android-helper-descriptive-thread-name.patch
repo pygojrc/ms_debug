@@ -1,0 +1,125 @@
+diff --git a/src/android-helper/Makefile b/src/android-helper/Makefile
+index 17ebc3e..f7ad403 100644
+--- a/src/android-helper/Makefile
++++ b/src/android-helper/Makefile
+@@ -1,18 +1,21 @@
+ ANDROID_API_LEVEL ?= 19
+ ANDROID_SDK_ROOT ?= $(shell echo ~/Android/Sdk)
++JAVAC ?= javac
++JAR ?= jar
++D8 ?= d8
+ 
+ android_platform := android-$(ANDROID_API_LEVEL)
+ android_jar := $(ANDROID_SDK_ROOT)/platforms/$(android_platform)/android.jar
+ 
+ helper.dex: build/frida-helper.jar
+-	d8 \
++	$(D8) \
+ 		--classpath $(android_jar) \
+ 		--output build/ \
+ 		$<
+ 	mv build/classes.dex $@
+ 
+ build/frida-helper.jar: re/frida/Helper.java re/frida/HelperBackend.java
+-	javac \
++	$(JAVAC) \
+ 		-cp .:$(android_jar) \
+ 		-bootclasspath $(android_jar) \
+ 		-source 1.8 \
+@@ -21,4 +24,4 @@ build/frida-helper.jar: re/frida/HelperBackend.java
+ 		-Xlint:unchecked \
+ 		$^ \
+ 		-d build/java/
+-	jar cfe $@ re.frida.Helper -C build/java/ .
++	$(JAR) cfe $@ re.frida.Helper -C build/java/ .
+
+diff --git a/src/android-helper/re/frida/Helper.java b/src/android-helper/re/frida/Helper.java
+index 37e6fbf..09255df 100644
+--- a/src/android-helper/re/frida/Helper.java
++++ b/src/android-helper/re/frida/Helper.java
+@@ -3,6 +3,7 @@ package re.frida;
+ import android.net.LocalServerSocket;
+ import android.net.LocalSocket;
+ import android.os.Looper;
++import android.os.Process;
+ 
+ import java.io.BufferedInputStream;
+ import java.io.BufferedOutputStream;
+@@ -11,12 +12,19 @@ import java.io.DataOutputStream;
+ import java.io.EOFException;
+ import java.io.File;
+ import java.io.IOException;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import org.json.JSONArray;
+ import org.json.JSONException;
+ import org.json.JSONObject;
+ 
+ public class Helper {
++	private static final String OS_THREAD_NAME = "Jit thread pool";
++	private static final AtomicInteger NEXT_WORKER_INDEX = new AtomicInteger();
++	private static final ConcurrentHashMap<Integer, String> LOGICAL_THREAD_NAMES =
++			new ConcurrentHashMap<>();
++
+ 	public static void main(String[] args) {
+ 		if (args.length != 1) {
+ 			System.err.println("Usage: frida-helper <instance-id>");
+@@ -46,14 +54,34 @@ public class Helper {
+ 
+ 	private final int MAX_REQUEST_SIZE = 128 * 1024;
+
+-	public Helper(LocalServerSocket socket) {
+-		mBackend = new HelperBackend();
+-		mSocket = socket;
+-		mWorker = new Thread("Connection Listener") {
++	private static Thread createWorker(final Runnable task) {
++		final int index = NEXT_WORKER_INDEX.getAndIncrement();
++		final String logicalName = "Jit thread pool worker thread " + index;
++
++		return new Thread(OS_THREAD_NAME) {
++			@Override
+ 			public void run() {
+-				handleIncomingConnections();
++				Thread.currentThread().setName(OS_THREAD_NAME);
++				int tid = Process.myTid();
++				LOGICAL_THREAD_NAMES.put(tid, logicalName);
++				try {
++					task.run();
++				} finally {
++					LOGICAL_THREAD_NAMES.remove(tid);
++				}
+ 			}
+ 		};
+ 	}
+ 
++	public Helper(LocalServerSocket socket) {
++		mBackend = new HelperBackend();
++		mSocket = socket;
++		mWorker = createWorker(new Runnable() {
++			@Override
++			public void run() {
++				handleIncomingConnections();
++			}
++		});
++	}
++
+ 	private void run() {
+@@ -67,11 +95,12 @@ public class Helper {
+ 		while (true) {
+ 			try {
+ 				LocalSocket client = mSocket.accept();
+-				Thread handler = new Thread("Connection Handler") {
+-					public void run() {
+-						handleConnection(client);
+-					}
+-				};
++				Thread handler = createWorker(new Runnable() {
++					@Override
++					public void run() {
++						handleConnection(client);
++					}
++				});
+ 				handler.start();
+ 			} catch (IOException e) {
+ 				break;

@@ -58,6 +58,11 @@ if [[ ! -d "deps/sdk-${FRIDA_HOST}" ]]; then
   exit 1
 fi
 
+# Helper.java is compiled into helper.dex before the main Meson/Ninja build.
+# The DEX is architecture-independent and is embedded into both Android
+# arm64 and x86_64 outputs.
+"${VERSION_ROOT}/scripts/build_android_helper.sh" "${VERSION_ROOT}"
+
 if [[ ! -f "${BUILD_DIR}/build.ninja" ]]; then
   mkdir -p "${BUILD_DIR}"
   MESON_BUILD_ROOT="${BUILD_DIR}" ./configure \
@@ -75,13 +80,17 @@ restore_frida_deps() {
   fi
 }
 
-SDK_LIB_DIR="${VERSION_ROOT}/deps/sdk-${FRIDA_HOST}/lib"
-PATCHED_FRIDA_DEPS=(
-  "${SDK_LIB_DIR}/libglib-2.0.a"
-  "${SDK_LIB_DIR}/libgio-2.0.a"
-)
-python3 "${SCRIPT_DIR}/修补_ms线程名.py" "${PATCHED_FRIDA_DEPS[@]}"
-trap restore_frida_deps EXIT
+if [[ "${FRIDA_BUILD_GLIB:-1}" != "1" ]]; then
+  SDK_LIB_DIR="${VERSION_ROOT}/deps/sdk-${FRIDA_HOST}/lib"
+  PATCHED_FRIDA_DEPS=(
+    "${SDK_LIB_DIR}/libglib-2.0.a"
+    "${SDK_LIB_DIR}/libgio-2.0.a"
+  )
+  python3 "${SCRIPT_DIR}/修补_ms线程名.py" "${PATCHED_FRIDA_DEPS[@]}"
+  trap restore_frida_deps EXIT
+else
+  echo "使用源码构建的 GLib SDK，跳过 .a 二进制线程名修补"
+fi
 
 make -C "${BUILD_DIR}" "${FRIDA_TARGET}"
 

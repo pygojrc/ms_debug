@@ -1,0 +1,30 @@
+diff --git a/lib/payload/libc-shim.c b/lib/payload/libc-shim.c
+index 862737f..8141667 100644
+--- a/lib/payload/libc-shim.c
++++ b/lib/payload/libc-shim.c
+@@ -293,6 +293,25 @@ frida_libc_shim_init (void)
+   if (frida_libc_shim_initialized)
+     return;
+ 
++#if defined (HAVE_ANDROID)
++  /* ms_debug: 可选关闭 exceptor 对 signal/sigaction 的 inline hook。
++     默认保持上游 FULL 行为不变。开启方式（任一命中即开启）：
++       1. 环境变量 MS_EXCEPTOR_HANDLER_ONLY 存在
++       2. 文件 /data/local/tmp/msexceptor.handler_only 存在
++     为什么还要文件：frida-so-inject 不向目标进程传递环境变量，
++     所以环境变量只对注入器自身生效，目标进程读不到，必须靠文件标记。
++     开启后改用 HANDLER_ONLY 模式：只安装信号处理器，不改写这几个函数的机器码，
++     函数头保持原始 paciasp，避免被加固壳的 inline hook 检测
++     （读函数前 12 字节判 paciasp）命中。
++     代价：目标应用之后调用 sigaction/signal 会真实生效，可能覆盖我们装的处理器。
++     必须在 gum_init_embedded() 之前调用：set_mode 内部断言 exceptor 尚未创建。
++     注意：exit/_exit/abort 的 hook 由 ExitMonitor 负责，需通过 attach()
++     的 exit_monitor=False 关闭，本开关不覆盖。 */
++  if (getenv ("MS_EXCEPTOR_HANDLER_ONLY") != NULL ||
++      access ("/data/local/tmp/msexceptor.handler_only", F_OK) == 0)
++    gum_exceptor_set_mode (GUM_EXCEPTOR_MODE_HANDLER_ONLY);
++#endif
++
+   gum_init_embedded ();
+ 
+   f0 = NULL;

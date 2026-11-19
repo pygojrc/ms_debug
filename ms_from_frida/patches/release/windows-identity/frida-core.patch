@@ -1,0 +1,113 @@
+diff --git a/lib/pipe/pipe-windows.c b/lib/pipe/pipe-windows.c
+index 26f448b..99b5c2b 100644
+--- a/lib/pipe/pipe-windows.c
++++ b/lib/pipe/pipe-windows.c
+@@ -472,7 +472,7 @@ frida_pipe_generate_name (void)
+   GString * s;
+   guint i;
+ 
+-  s = g_string_new ("frida-");
++  s = g_string_new ("ms-");
+   for (i = 0; i != 16; i++)
+     g_string_append_printf (s, "%02x", g_random_int_range (0, 255));
+ 
+diff --git a/src/system.vala b/src/system.vala
+index 998ef8c..7f62bab 100644
+--- a/src/system.vala
++++ b/src/system.vala
+@@ -238,7 +238,7 @@ namespace Frida {
+ 		}
+ 
+ 		public static string make_name () {
+-			var builder = new StringBuilder ("frida-");
++			var builder = new StringBuilder ("ms-");
+ 			for (var i = 0; i != 16; i++)
+ 				builder.append_printf ("%02x", Random.int_range (0, 256));
+ 			return builder.str;
+diff --git a/src/windows/frida-helper-backend-glue.c b/src/windows/frida-helper-backend-glue.c
+index b8518bc..d12ec49 100644
+--- a/src/windows/frida-helper-backend-glue.c
++++ b/src/windows/frida-helper-backend-glue.c
+@@ -408,6 +408,8 @@ frida_remote_worker_context_emit_payload (FridaRemoteWorkerContext * rwc, gpoint
+   const gchar * loadlibrary_failed = "loadlibrary_failed";
+   const gchar * skip_unload = "skip_unload";
+   const gchar * return_result = "return_result";
++  const gchar * skip_entrypoint_call = "skip_entrypoint_call";
++  const gchar * entrypoint_call_done = "entrypoint_call_done";
+ #ifdef HAVE_ARM64
+   GumArm64Writer cw;
+ 
+@@ -506,6 +508,11 @@ frida_remote_worker_context_emit_payload (FridaRemoteWorkerContext * rwc, gpoint
+       GUM_ARG_REGISTER, GUM_X86_XSI,
+       GUM_ARG_REGISTER, GUM_X86_XDX);
+ 
++  /* ms_debug: 空 entrypoint（load-only 注入）时 GetProcAddress 返回 NULL，
++   * 直接调用会崩溃；这里跳过调用并按常驻处理。 */
++  gum_x86_writer_put_test_reg_reg (&cw, GUM_X86_XAX, GUM_X86_XAX);
++  gum_x86_writer_put_jcc_near_label (&cw, X86_INS_JE, skip_entrypoint_call, GUM_NO_HINT);
++
+   /* xax (xbx->entrypoint_data, &xbx->stay_resident, NULL) */
+   gum_x86_writer_put_lea_reg_reg_offset (&cw, GUM_X86_XCX,
+       GUM_X86_XBX, G_STRUCT_OFFSET (FridaRemoteWorkerContext, entrypoint_data));
+@@ -516,6 +523,13 @@ frida_remote_worker_context_emit_payload (FridaRemoteWorkerContext * rwc, gpoint
+       GUM_ARG_REGISTER, GUM_X86_XCX,
+       GUM_ARG_REGISTER, GUM_X86_XDX,
+       GUM_ARG_ADDRESS, GUM_ADDRESS (0));
++  gum_x86_writer_put_jmp_near_label (&cw, entrypoint_call_done);
++
++  gum_x86_writer_put_label (&cw, skip_entrypoint_call);
++  /* stay_resident = TRUE */
++  gum_x86_writer_put_mov_reg_offset_ptr_u32 (&cw, GUM_X86_XBX,
++      G_STRUCT_OFFSET (FridaRemoteWorkerContext, stay_resident), 1);
++  gum_x86_writer_put_label (&cw, entrypoint_call_done);
+ 
+   /* if (!xbx->stay_resident) { */
+   gum_x86_writer_put_mov_reg_reg_offset_ptr (&cw, GUM_X86_EAX,
+diff --git a/src/windows/frida-helper-process.vala b/src/windows/frida-helper-process.vala
+index 12ce73c..b4fdf25 100644
+--- a/src/windows/frida-helper-process.vala
++++ b/src/windows/frida-helper-process.vala
+@@ -159,7 +159,7 @@ namespace Frida {
+ 
+ 				stream_request = Pipe.open (transport.local_address, cancellable);
+ 
+-				new Thread<bool> ("frida-helper-factory", obtain_worker);
++				new Thread<bool> ("ms-helper-factory", obtain_worker);
+ 			}
+ 
+ 			return yield obtain_request.future.wait_async (cancellable);
+@@ -404,7 +404,7 @@ namespace Frida {
+ 
+ #if HAVE_EMBEDDED_ASSETS
+ 		private TemporaryFile add_helper (string name, Frida.Data.Helper.Blob blob, TemporaryDirectory tempdir) throws Error {
+-			var file = new TemporaryFile.from_stream (@"frida-helper-$name.exe",
++			var file = new TemporaryFile.from_stream (@"ms-helper-$name.exe",
+ 				new MemoryInputStream.from_data (blob.data, null),
+ 				tempdir);
+ 			helpers.add (file);
+diff --git a/src/windows/windows-host-session.vala b/src/windows/windows-host-session.vala
+index 167ea74..136060d 100644
+--- a/src/windows/windows-host-session.vala
++++ b/src/windows/windows-host-session.vala
+@@ -47,7 +47,7 @@ namespace Frida {
+ 			injector.uninjected.connect (on_uninjected);
+ 
+ #if HAVE_EMBEDDED_ASSETS
+-			agent = new AgentDescriptor (PathTemplate ("<arch>\\frida-agent.dll"),
++			agent = new AgentDescriptor (PathTemplate ("<arch>\\msagent.dll"),
+ 				new Bytes.static (Frida.Data.Agent.get_frida_agent_arm64_dll_blob ().data),
+ 				new Bytes.static (Frida.Data.Agent.get_frida_agent_x86_64_dll_blob ().data),
+ 				new Bytes.static (Frida.Data.Agent.get_frida_agent_x86_dll_blob ().data),
+diff --git a/src/windows/winjector.vala b/src/windows/winjector.vala
+index 459e54f..88c9a82 100644
+--- a/src/windows/winjector.vala
++++ b/src/windows/winjector.vala
+@@ -57,7 +57,7 @@ namespace Frida {
+ 		public async uint inject_library_blob (uint pid, Bytes blob, string entrypoint, string data, Cancellable? cancellable)
+ 				throws Error, IOError {
+ 			ensure_tempdir_prepared ();
+-			var name = "blob%u.dll".printf (next_blob_id++);
++			var name = "msagent%u.dll".printf (next_blob_id++);
+ 			var file = new TemporaryFile.from_stream (name, new MemoryInputStream.from_bytes (blob), tempdir);
+ 
+ 			var id = yield inject_library_file (pid, file.path, entrypoint, data, cancellable);

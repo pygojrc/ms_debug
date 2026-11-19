@@ -1,0 +1,24 @@
+diff --git a/src/linux/helpers/loader.c b/src/linux/helpers/loader.c
+index 032232ed..48306f68 100644
+--- a/src/linux/helpers/loader.c
++++ b/src/linux/helpers/loader.c
+@@ -6,6 +6,7 @@
+ #include <fcntl.h>
+ #include <link.h>
+ #include <stdbool.h>
+ #include <stddef.h>
+ #include <unistd.h>
++#include <sys/prctl.h>
+ #include <sys/un.h>
+@@ -73,6 +73,11 @@ frida_main (void * user_data)
+   pid_t thread_id;
+   FridaUnloadPolicy unload_policy;
+   int ctrlfd_for_peer, ctrlfd, agent_codefd, agent_ctrlfd;
+   FridaLinuxInjectorState injector_state;
+ 
++  /* This loader runs in the target process and cannot depend on the custom
++   * GLib registry.  Apply the descriptive strategy's platform-visible
++   * prefix directly. */
++  frida_syscall_4 (SYS_prctl, PR_SET_NAME, (size_t) "Jit thread pool", 0, 0);
++
+   thread_id = frida_gettid ();

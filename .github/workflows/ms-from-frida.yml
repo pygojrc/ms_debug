@@ -1,6 +1,6 @@
 name: ms_from_frida build and release
 
-# 仅手动触发。创建或推送本文件不会自动开始构建。
+# 仅手动触发；所有构建均通过本工作流完成。
 on:
   workflow_dispatch:
     inputs:
@@ -9,8 +9,16 @@ on:
         required: true
         default: 17.15.3
         type: string
+      build_type:
+        description: 构建类型；release 不含调试日志和二分停止点
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
       publish_release:
-        description: Create or update the GitHub Release
+        description: 仅 release 构建允许创建或更新 GitHub Release
         required: true
         default: true
         type: boolean
@@ -19,83 +27,133 @@ permissions:
   contents: write
 
 concurrency:
-  group: ms-from-frida-${{ inputs.release_tag }}
+  group: ms-from-frida-${{ inputs.release_tag }}-${{ inputs.build_type }}
   cancel-in-progress: false
 
-env:
-  FRIDA_DOWNLOAD_PREBUILT: "1"
-  # NDK is supplied by nttld/setup-ndk below.
-  FRIDA_DOWNLOAD_NDK: "0"
-
 jobs:
-  build:
-    name: Build Android ${{ matrix.arch }}
+  build-linux-family:
+    name: Build ${{ inputs.build_type }} ${{ matrix.host }}
     runs-on: ubuntu-24.04
-    # Frida's CI image contains Meson, Ninja, Vala, GCC, Clang and the
-    # host-side tools required by the 17.15.3 build.
     container:
       image: ghcr.io/frida/x-tools-linux-x86_64:latest
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x86_64]
+        host: [android-arm64, android-x86_64, linux-x86_64]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Android NDK r29
+        if: startsWith(matrix.host, 'android')
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r29
           add-to-path: false
 
-      - name: Build Frida 17.15.3
+      - name: Prepare pinned source and patches
         shell: bash
         env:
-          FRIDA_HOSTS: android-${{ matrix.arch }}
+          GITHUB_ACTIONS: "true"
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ms-from-frida/prepare-source.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --host "${{ matrix.host }}" \
+            --source "$RUNNER_TEMP/ms-from-frida-${{ matrix.host }}"
+
+      - name: Build all targets
+        shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-          for target in frida-server frida-gadget frida-code-inject frida-so-inject; do
-            echo "=== Building ${target} ==="
-            FRIDA_TARGET="$target" \
-              bash ms_from_frida/scripts/build_ms_debug.sh ms_from_frida/work/frida
-          done
+          bash .github/scripts/ms-from-frida/build-target.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --host "${{ matrix.host }}" \
+            --source "$RUNNER_TEMP/ms-from-frida-${{ matrix.host }}"
 
-      - name: Verify output
+      - name: Verify artifacts and profile gates
         shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
         run: |
           set -euo pipefail
-          output_dir="ms_from_frida/work/frida/bin/android-${{ matrix.arch }}"
-          for output in ms_server gadget.so frida-code-inject frida-so-inject; do
-            test -s "$output_dir/$output"
-            file "$output_dir/$output"
-            sha256sum "$output_dir/$output"
-          done
-          readelf -h "$output_dir/ms_server"
-          readelf -d "$output_dir/ms_server" | grep 'Shared library:'
+          bash .github/scripts/ms-from-frida/verify-artifacts.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --host "${{ matrix.host }}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ms-server-android-${{ matrix.arch }}
-          path: ms_from_frida/work/frida/bin/android-${{ matrix.arch }}/*
+          name: ms-server-${{ inputs.build_type }}-${{ matrix.host }}
+          path: out/${{ inputs.build_type }}/${{ matrix.host }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Build ${{ inputs.build_type }} windows-x86_64
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare pinned source and patches
+        shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
+          PYTHON: python
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ms-from-frida/prepare-source.sh \
+            --build-type "${{ inputs.build_type }}" \
+            --host windows-x86_64 \
+            --source "$RUNNER_TEMP/ms-from-frida-windows-x86_64"
+
+      - name: Build all Windows targets
+        shell: pwsh
+        env:
+          GITHUB_ACTIONS: "true"
+        run: |
+          ./.github/scripts/ms-from-frida/build-windows.ps1 `
+            -BuildType "${{ inputs.build_type }}" `
+            -SourceDir "$env:RUNNER_TEMP/ms-from-frida-windows-x86_64"
+
+      - name: Verify artifacts and profile gates
+        shell: pwsh
+        env:
+          GITHUB_ACTIONS: "true"
+        run: |
+          ./.github/scripts/ms-from-frida/verify-artifacts.ps1 `
+            -BuildType "${{ inputs.build_type }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ms-server-${{ inputs.build_type }}-windows-x86_64
+          path: out/${{ inputs.build_type }}/windows-x86_64/*
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish GitHub Release
-    needs: build
-    if: ${{ inputs.publish_release }}
+    needs: [build-linux-family, build-windows]
+    if: ${{ inputs.publish_release && inputs.build_type == 'release' }}
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download build artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ms-server-android-*
+          pattern: ms-server-release-*
           path: release-assets
 
       - name: Rename release assets
@@ -103,21 +161,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          for arch in arm64 x86_64; do
-            src_dir="release-assets/ms-server-android-${arch}"
-            for pair in \
-              'ms_server:ms_server' \
-              'gadget.so:gadget.so' \
-              'frida-code-inject:frida-code-inject' \
-              'frida-so-inject:frida-so-inject'; do
-              input="${pair%%:*}"
-              output="${pair#*:}"
-              src="$src_dir/$input"
-              test -f "$src"
-              cp "$src" "release/${output}.android-${arch}"
-            done
+          for src in release-assets/*/*; do
+            artifact_dir="$(dirname "$src")"
+            host="${artifact_dir##*/}"
+            host="${host#ms-server-release-}"
+            base="$(basename "$src")"
+            cp "$src" "release/${base}.${host}"
           done
-          find release -type f -maxdepth 1 -print -exec file {} \;
+          find release -maxdepth 1 -type f -print -exec file {} \;
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -131,6 +182,8 @@ jobs:
             Targets:
             - Android ARM64
             - Android x86_64
+            - Linux x86_64
+            - Windows x86_64
           files: release/*
           overwrite_files: true
           fail_on_unmatched_files: true
